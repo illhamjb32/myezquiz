@@ -1,0 +1,13 @@
+.next/
+node_modules/
+.npm-cache/
+.tmp/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.tsbuildinfo
+.env*
+!.env.example
+__pycache__/
+*.pyc
