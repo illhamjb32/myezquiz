@@ -1,19 +1,44 @@
 # EZQuiz
 
-Aplikasi kuis kelas dengan dashboard guru dan murid, akun, tugas, papan peringkat, serta XP yang disimpan di SQLite. Antarmuka menggunakan Next.js App Router, React, dan Tailwind CSS; API dan logika kuis tetap dijalankan oleh server Python.
+Aplikasi kuis kelas dengan dashboard guru dan murid, akun, tugas, papan peringkat, serta XP. Antarmuka menggunakan Next.js App Router, React, dan Tailwind CSS; data dan seluruh logika kuis (akun, sesi, penilaian) ditangani langsung oleh Next.js **route handler** yang terhubung ke **Neon** (Postgres serverless).
+
+## Arsitektur
+
+- **Frontend & API**: Next.js App Router. Semua rute `/api/*` ditangani oleh satu route handler di `app/api/[[...path]]/route.ts`.
+- **Database**: Neon Postgres (`@neondatabase/serverless`). Skema didefinisikan di `migrations/001_initial_schema.sql`.
+
+Tidak ada lagi server Python/SQLite; seluruh data tersimpan di Neon.
 
 ## Menjalankan aplikasi
 
-Persyaratan: Node.js 20.9+ dan Python 3.10+.
+Persyaratan: Node.js 20.9+.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Buka `http://localhost:3000`, lalu daftar sebagai guru. Akun murid dibuat oleh guru melalui menu **Murid**. Perintah pengembangan menjalankan Next.js pada port `3000` dan API Python pada port `8000` secara bersamaan.
+Buka `http://localhost:3000`, lalu daftar sebagai guru. Akun murid dibuat oleh guru melalui menu **Murid**. Setiap akun guru baru otomatis mendapat template kuis Matematika dan English.
 
-Database `ezquiz.db` tetap kompatibel dan berada di folder proyek secara default. Atur `EZQUIZ_DB` untuk menggunakan lokasi database persisten lain. Setiap akun guru baru otomatis mendapat template kuis Matematika dan English.
+## Konfigurasi database
+
+Salin `.env.local` (sudah berisi koneksi Neon) atau buat dari contoh:
+
+```env
+DATABASE_URL="<pooled connection string>"
+DATABASE_URL_UNPOOLED="<direct connection string>"
+```
+
+- `DATABASE_URL` (disambungkan via pooler `-pooler`) digunakan untuk lalu lintas aplikasi.
+- `DATABASE_URL_UNPOOLED` (direct) digunakan untuk migrasi skema.
+
+## Migrasi skema
+
+```bash
+npm run db:migrate
+```
+
+Skema bersifat idempotent (`IF NOT EXISTS`), aman dijalankan berulang. Gunakan koneksi direct (unpooled) untuk migrasi.
 
 ## Pemeriksaan dan build
 
@@ -24,19 +49,6 @@ npm run build
 npm start
 ```
 
-`npm start` menjalankan build Next.js dan API Python untuk penggunaan setelah build.
-
-## Konfigurasi API
-
-Next.js meneruskan rute `/api/*` ke server Python di `http://127.0.0.1:8000`. Atur `API_ORIGIN` bila API berada di alamat lain. Port API dapat diubah dengan `API_PORT`; `PORT` digunakan sebagai fallback.
-
-Contoh untuk menjalankan layanan secara terpisah:
-
-```bash
-python server.py
-npm run dev
-```
-
 ## Deploy
 
-Deploy Next.js dan server Python sebagai dua proses layanan yang dapat saling terhubung; pastikan `API_ORIGIN` menunjuk ke server API. Simpan `ezquiz.db` pada volume persisten, lindungi dengan backup berkala, dan gunakan HTTPS agar cookie sesi terlindungi. Jangan menghapus atau mengganti database lama selama migrasi.
+Cukup deploy aplikasi Next.js (mis. Vercel) dan set variabel lingkungan `DATABASE_URL` ke koneksi Neon. Aktifkan HTTPS agar cookie sesi terlindungi. Database dikelola sepenuhnya oleh Neon — branching, backup, dan isolasi lingkungan terkelola dari konsol Neon.

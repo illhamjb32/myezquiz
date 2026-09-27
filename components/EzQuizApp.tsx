@@ -113,7 +113,15 @@ async function api<T>(path: string, data?: unknown): Promise<T> {
     cache: "no-store",
     body: data === undefined ? undefined : JSON.stringify(data),
   });
-  const body = (await response.json()) as T & { error?: string };
+  const responseText = await response.text();
+  let body: T & { error?: string };
+  try {
+    body = JSON.parse(responseText) as T & { error?: string };
+  } catch {
+    const error = new Error(`Server API mengembalikan respons non-JSON (HTTP ${response.status}).`) as ApiError;
+    error.status = response.status;
+    throw error;
+  }
   if (!response.ok) {
     const error = new Error(body.error || "Terjadi kesalahan.") as ApiError;
     error.status = response.status;

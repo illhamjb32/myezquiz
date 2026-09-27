@@ -3,15 +3,17 @@
   "version": "2.0.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently -k -n WEB,API -c cyan,magenta \"next dev\" \"cross-env API_PORT=8000 python server.py\"",
+    "dev": "next dev",
     "build": "next build",
-    "start": "concurrently -k -n WEB,API -c cyan,magenta \"next start\" \"cross-env API_PORT=8000 python server.py\"",
+    "start": "next start",
+    "db:migrate": "node scripts/migrate.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@neon/config": "^1.8.2",
     "@neon/env": "^1.4.7",
+    "@neondatabase/serverless": "^1.1.0",
     "lucide-react": "1.48.0",
     "next": "16.3.6",
     "react": "19.3.0",
@@ -22,8 +24,6 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "concurrently": "^9.2.1",
-    "cross-env": "^10.1.0",
     "eslint": "^9.0.0",
     "eslint-config-next": "16.3.6",
     "tailwindcss": "4.3.3",
