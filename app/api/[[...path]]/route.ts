@@ -3,10 +3,12 @@ import { database } from "@/lib/db";
 import { createSessionToken, hashPassword, hashSessionToken, SESSION_COOKIE, verifyPassword } from "@/lib/auth";
 
 type DbUser = { id: number; username: string; name: string; role: "teacher" | "student"; xp: number; password?: string; teacher_id?: number | null };
-type DbQuiz = { id: number; title: string; description: string; time_per_question: number; questions: Array<{ q: string; options: string[]; answer?: number; points?: number }> };
-type DbAssignment = DbQuiz & { assignment_id: number; due_date: string | null; earned_xp: number | null; result_correct: number | null; result_total: number | null };
-type DbQuestion = { q: string; options: string[]; answer: number; points?: number };
+type DbQuiz = { id: number; title: string; description: string; time_per_question: number; questions: Array<{ q: string; options: string[]; answer?: number; points?: number; explanation?: string; image?: string; optionImages?: Array<string | null> }> };
+type DbAssignment = DbQuiz & { assignment_id: number; due_date: string | null; earned_xp: number | null; result_correct: number | null; result_total: number | null; has_attempt?: number | null };
+type DbQuestion = { q: string; options: string[]; answer?: number; points?: number; explanation?: string; image?: string; optionImages?: Array<string | null> };
 type QuizPayload = { title: string; desc: string; timePerQ: number; questions: DbQuestion[] };
+type AnswerRec = { selected: number | null; isCorrect: boolean; gain: number };
+type DbAttemptFields = { current_question: number; attempt_correct: number; attempt_xp: number; streak: number; question_started_at: number; answers: AnswerRec[] };
 
 const templates: Array<Omit<QuizPayload, "title"> & { title: string }> = [
   { title: "Matematika Seru — Level 1", desc: "Penjumlahan & pengurangan cepat.", timePerQ: 20, questions: [
@@ -45,12 +47,13 @@ function quizDict(row: DbQuiz) {
 function assignmentDict(row: DbAssignment) {
   return {
     ...quizDict(row),
-    questions: row.questions.map(({ q, options, points }) => ({ q, options, points: points ?? 100 })),
+    questions: row.questions.map(({ q, options, points, image, optionImages }) => ({ q, options, points: points ?? 100, image, optionImages })),
     assignmentId: Number(row.assignment_id),
     dueDate: row.due_date,
     earnedXP: row.earned_xp === null ? null : Number(row.earned_xp),
     resultCorrect: row.result_correct === null ? null : Number(row.result_correct),
     resultTotal: row.result_total === null ? null : Number(row.result_total),
+    isAttempting: row.has_attempt !== null && row.has_attempt !== undefined,
   };
 }
 
@@ -94,7 +97,10 @@ function validateQuiz(data: Record<string, unknown>): QuizPayload {
     const rawPoints = question.points ?? 100;
     const points = Number(rawPoints);
     if (!Number.isFinite(points)) throw new ApiError(`Poin soal ${index + 1} tidak valid.`, 400);
-    return { q: question.q.trim(), options: options.map((option) => (option as string).trim()), answer: question.answer, points: Math.max(10, Math.min(1000, Math.trunc(points))) };
+    const explanation = typeof question.explanation === "string" ? question.explanation.trim().slice(0, 2000) : undefined;
+    const image = typeof question.image === "string" && question.image.trim() ? question.image.trim().slice(0, 2000) : undefined;
+    const optionImages = Array.isArray(question.optionImages) && question.optionImages.length === 4 ? question.optionImages.map((img) => typeof img === "string" && img.trim() ? img.trim().slice(0, 2000) : null) : undefined;
+    return { q: question.q.trim(), options: options.map((option) => (option as string).trim()), answer: question.answer, points: Math.max(10, Math.min(1000, Math.trunc(points))), explanation, image, optionImages };
   });
   const timePerQ = Number(data.timePerQ ?? 20);
   if (!Number.isFinite(timePerQ)) throw new ApiError("Waktu per soal tidak valid.", 400);
@@ -103,6 +109,25 @@ function validateQuiz(data: Record<string, unknown>): QuizPayload {
 
 function isUsername(value: string) {
   return /^[a-z0-9_.-]{3,30}$/.test(value);
+}
+
+function toAnswers(value: unknown): AnswerRec[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return { selected: null, isCorrect: false, gain: 0 };
+    const record = item as Record<string, unknown>;
+    const selected = typeof record.selected === "number" && Number.isInteger(record.selected) ? record.selected : null;
+    return { selected, isCorrect: record.isCorrect === true, gain: typeof record.gain === "number" && Number.isFinite(record.gain) ? record.gain : 0 };
+  });
+}
+
+async function finalizeAttempt(sql: ReturnType<typeof database>, assignmentId: number, studentId: number, questions: DbQuestion[], answers: AnswerRec[], correct: number, xp: number) {
+  await sql.transaction((tx) => [
+    tx`INSERT INTO results (assignment_id, correct, total, xp, answers) VALUES (${assignmentId}, ${correct}, ${questions.length}, ${xp}, ${JSON.stringify(answers)}::jsonb)`,
+    tx`UPDATE users SET xp = xp + ${xp} WHERE id = ${studentId}`,
+    tx`DELETE FROM attempts WHERE assignment_id = ${assignmentId}`,
+  ]);
+  return { isCorrect: answers[answers.length - 1]?.isCorrect ?? false, correctAnswer: answers.length ? questions[answers.length - 1]?.answer : null, gain: answers[answers.length - 1]?.gain ?? 0, xp, streak: 0, finished: true, correct, total: questions.length, nextQuestion: questions.length, explanation: null };
 }
 
 function routeError(error: unknown) {
@@ -132,12 +157,26 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
       const students = await sql`SELECT id, username, name, xp FROM users WHERE teacher_id = ${user.id} AND role = 'student' ORDER BY name`;
       return json({ students: students.map((student) => ({ ...student, id: Number(student.id), xp: Number(student.xp) })) });
     }
+    if (path[0] === "students" && path[1] && /^\d+$/.test(path[1])) {
+      await requireUser(request, "teacher");
+      const studentId = Number(path[1]);
+      const rows = await sql`SELECT id, username, name, xp FROM users WHERE id = ${studentId} AND teacher_id = ${user.id} AND role = 'student' LIMIT 1`;
+      const student = rows[0];
+      if (!student) throw new ApiError("Murid tidak ditemukan.", 404);
+      const tasks = await sql`SELECT a.id AS assignment_id, a.quiz_id, a.due_date::text AS due_date, q.title AS quiz_title, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, t.current_question FROM assignments a JOIN quizzes q ON q.id = a.quiz_id LEFT JOIN results r ON r.assignment_id = a.id LEFT JOIN attempts t ON t.assignment_id = a.id WHERE a.student_id = ${studentId} AND q.teacher_id = ${user.id} ORDER BY a.id DESC`;
+      return json({ student: { id: Number(student.id), username: student.username, name: student.name, xp: Number(student.xp) }, assignments: tasks.map((row) => ({ assignmentId: Number(row.assignment_id), quizId: Number(row.quiz_id), quizTitle: row.quiz_title, dueDate: row.due_date, earnedXP: row.earned_xp === null ? null : Number(row.earned_xp), resultCorrect: row.result_correct === null ? null : Number(row.result_correct), resultTotal: row.result_total === null ? null : Number(row.result_total), isAttempting: row.current_question !== null })) });
+    }
     if (route === "/quizzes" && user.role === "teacher") {
       const quizzes = await sql`SELECT id, title, description, time_per_question, questions FROM quizzes WHERE teacher_id = ${user.id} ORDER BY id DESC` as unknown as DbQuiz[];
-      return json({ quizzes: quizzes.map(quizDict) });
+      const assignments = await sql`SELECT a.id AS assignment_id, a.quiz_id, a.student_id, a.due_date::text AS due_date, u.name AS student_name, u.username AS student_username, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, r.completed_at::text AS completed_at, t.current_question FROM assignments a JOIN quizzes q ON q.id = a.quiz_id JOIN users u ON u.id = a.student_id LEFT JOIN results r ON r.assignment_id = a.id LEFT JOIN attempts t ON t.assignment_id = a.id WHERE q.teacher_id = ${user.id} ORDER BY a.id DESC`;
+      return json({ quizzes: quizzes.map(quizDict), assignments: assignments.map((row) => ({ assignmentId: Number(row.assignment_id), quizId: Number(row.quiz_id), studentId: Number(row.student_id), studentName: row.student_name, studentUsername: row.student_username, dueDate: row.due_date, earnedXP: row.earned_xp === null ? null : Number(row.earned_xp), resultCorrect: row.result_correct === null ? null : Number(row.result_correct), resultTotal: row.result_total === null ? null : Number(row.result_total), completedAt: row.completed_at, isAttempting: row.current_question !== null })) });
+    }
+    if (route === "/history" && user.role === "student") {
+      const rows = await sql`SELECT a.id AS assignment_id, a.due_date::text AS due_date, r.id AS result_id, r.correct, r.total, r.xp AS earned_xp, r.completed_at::text AS completed_at, r.answers, q.id AS quiz_id, q.title, q.description, q.time_per_question, q.questions FROM results r JOIN assignments a ON a.id = r.assignment_id JOIN quizzes q ON q.id = a.quiz_id WHERE a.student_id = ${user.id} ORDER BY r.completed_at DESC`;
+      return json({ history: rows.map((row) => ({ assignmentId: Number(row.assignment_id), quizId: Number(row.quiz_id), title: row.title, desc: row.description, timePerQ: Number(row.time_per_question), dueDate: row.due_date, resultId: Number(row.result_id), correct: Number(row.correct), total: Number(row.total), earnedXP: Number(row.earned_xp), completedAt: row.completed_at, questions: row.questions, answers: toAnswers(row.answers) })) });
     }
     if (route === "/quizzes" && user.role === "student") {
-      const assignments = await sql`SELECT a.id AS assignment_id, a.due_date::text AS due_date, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, q.id, q.title, q.description, q.time_per_question, q.questions FROM assignments a JOIN quizzes q ON q.id = a.quiz_id LEFT JOIN results r ON r.assignment_id = a.id WHERE a.student_id = ${user.id} ORDER BY a.id DESC` as unknown as DbAssignment[];
+      const assignments = await sql`SELECT a.id AS assignment_id, a.due_date::text AS due_date, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, q.id, q.title, q.description, q.time_per_question, q.questions, (SELECT 1 FROM attempts t WHERE t.assignment_id = a.id LIMIT 1) AS has_attempt FROM assignments a JOIN quizzes q ON q.id = a.quiz_id LEFT JOIN results r ON r.assignment_id = a.id WHERE a.student_id = ${user.id} ORDER BY a.id DESC` as unknown as DbAssignment[];
       return json({ assignments: assignments.map(assignmentDict) });
     }
     if (path[0] === "quiz" && path[1] && /^\d+$/.test(path[1])) {
@@ -152,7 +191,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
       const questions = assignment.questions;
       const question = questions[Number(attempt.current_question)];
       if (!question) throw new ApiError("Semua soal kuis ini sudah dijawab.", 409);
-      return json({ assignment: { ...quizDict(assignment), questions: [{ q: question.q, options: question.options, points: question.points ?? 100 }], assignmentId, dueDate: assignment.due_date, earnedXP: null, resultCorrect: null, resultTotal: null, currentQuestion: Number(attempt.current_question), totalQuestions: questions.length, attemptXP: Number(attempt.xp), streak: Number(attempt.streak) } });
+      return json({ assignment: { ...quizDict(assignment), questions: [{ q: question.q, options: question.options, points: question.points ?? 100, image: question.image, optionImages: question.optionImages }], assignmentId, dueDate: assignment.due_date, earnedXP: null, resultCorrect: null, resultTotal: null, currentQuestion: Number(attempt.current_question), totalQuestions: questions.length, attemptXP: Number(attempt.xp), streak: Number(attempt.streak) } });
     }
     if (route === "/leaderboard") {
       const teacherId = user.role === "student" ? user.teacher_id : user.id;
@@ -252,7 +291,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
       const expectedIndex = Number(data.question_index);
       const selected = data.answer;
       if (!Number.isInteger(expectedIndex) || !(Number.isInteger(selected) || selected === -1)) throw new ApiError("Data jawaban tidak valid.", 400);
-      const rows = await sql`SELECT a.id AS assignment_id, a.due_date::text AS due_date, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, q.id, q.title, q.description, q.time_per_question, q.questions, t.current_question, t.correct AS attempt_correct, t.xp AS attempt_xp, t.streak, t.question_started_at FROM assignments a JOIN quizzes q ON q.id = a.quiz_id JOIN attempts t ON t.assignment_id = a.id LEFT JOIN results r ON r.assignment_id = a.id WHERE a.id = ${assignmentId} AND a.student_id = ${student.id} LIMIT 1` as unknown as Array<DbAssignment & { current_question: number; attempt_correct: number; attempt_xp: number; streak: number; question_started_at: number }>;
+      const rows = await sql`SELECT a.id AS assignment_id, a.due_date::text AS due_date, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, q.id, q.title, q.description, q.time_per_question, q.questions, t.current_question, t.correct AS attempt_correct, t.xp AS attempt_xp, t.streak, t.question_started_at, t.answers FROM assignments a JOIN quizzes q ON q.id = a.quiz_id JOIN attempts t ON t.assignment_id = a.id LEFT JOIN results r ON r.assignment_id = a.id WHERE a.id = ${assignmentId} AND a.student_id = ${student.id} LIMIT 1` as unknown as Array<DbAssignment & DbAttemptFields>;
       const attempt = rows[0];
       if (!attempt) throw new ApiError("Sesi kuis tidak ditemukan.", 404);
       if (attempt.earned_xp !== null) throw new ApiError("Kuis ini sudah pernah diselesaikan.", 409);
@@ -269,17 +308,36 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
       const gain = isCorrect ? points + Math.round(Math.max(0, 1 - elapsed / Number(attempt.time_per_question)) * points * 0.5) + (streak >= 3 ? Math.round(points * 0.5) : 0) : 0;
       const xp = Number(attempt.attempt_xp) + gain;
       const nextIndex = index + 1;
+      const answers = toAnswers(attempt.answers);
+      answers[index] = { selected: typeof selected === "number" ? selected : null, isCorrect, gain };
       const finished = nextIndex >= attempt.questions.length;
       if (finished) {
-        await sql.transaction((tx) => [
-          tx`INSERT INTO results (assignment_id, correct, total, xp) VALUES (${assignmentId}, ${correct}, ${attempt.questions.length}, ${xp})`,
-          tx`UPDATE users SET xp = xp + ${xp} WHERE id = ${student.id}`,
-          tx`DELETE FROM attempts WHERE assignment_id = ${assignmentId}`,
-        ]);
+        await finalizeAttempt(sql, assignmentId, student.id, attempt.questions, answers, correct, xp);
       } else {
-        await sql`UPDATE attempts SET current_question = ${nextIndex}, correct = ${correct}, xp = ${xp}, streak = ${streak}, question_started_at = ${now} WHERE assignment_id = ${assignmentId} AND student_id = ${student.id}`;
+        await sql`UPDATE attempts SET current_question = ${nextIndex}, correct = ${correct}, xp = ${xp}, streak = ${streak}, question_started_at = ${now}, answers = ${JSON.stringify(answers)}::jsonb WHERE assignment_id = ${assignmentId} AND student_id = ${student.id}`;
       }
-      return json({ isCorrect, correctAnswer: question.answer, gain, xp, streak, finished, correct, total: attempt.questions.length, nextQuestion: nextIndex });
+      return json({ isCorrect, correctAnswer: question.answer, gain, xp, streak, finished, correct, total: attempt.questions.length, nextQuestion: nextIndex, explanation: question.explanation || null });
+    }
+    if (path[0] === "abandon" && path[1] && /^\d+$/.test(path[1])) {
+      const student = await requireUser(request, "student");
+      const assignmentId = Number(path[1]);
+      const rows = await sql`SELECT a.id AS assignment_id, r.xp AS earned_xp, q.id, q.title, q.description, q.time_per_question, q.questions, t.current_question, t.correct AS attempt_correct, t.xp AS attempt_xp, t.answers FROM assignments a JOIN quizzes q ON q.id = a.quiz_id JOIN attempts t ON t.assignment_id = a.id LEFT JOIN results r ON r.assignment_id = a.id WHERE a.id = ${assignmentId} AND a.student_id = ${student.id} LIMIT 1` as unknown as Array<DbAssignment & DbAttemptFields>;
+      const attempt = rows[0];
+      if (!attempt) throw new ApiError("Sesi kuis tidak ditemukan. Mungkin sudah selesai.", 404);
+      if (attempt.earned_xp !== null) throw new ApiError("Kuis ini sudah pernah diselesaikan.", 409);
+      const questions = attempt.questions;
+      const answeredCount = Number(attempt.current_question);
+      const answers = toAnswers(attempt.answers);
+      const padded: AnswerRec[] = questions.map((_, i) => answers[i] ?? { selected: null, isCorrect: false, gain: 0 });
+      const result = await finalizeAttempt(sql, assignmentId, student.id, questions, padded, Number(attempt.attempt_correct), Number(attempt.attempt_xp));
+      return json({ ...result, answeredCount, unansweredCount: questions.length - answeredCount });
+    }
+    if (path[0] === "assignments" && path[1] && /^\d+$/.test(path[1])) {
+      await requireUser(request, "teacher");
+      const assignmentId = Number(path[1]);
+      const deleted = await sql`DELETE FROM assignments a USING quizzes q WHERE a.id = ${assignmentId} AND a.quiz_id = q.id AND q.teacher_id = ${user.id} RETURNING a.id`;
+      if (!deleted.length) throw new ApiError("Tugas tidak ditemukan.", 404);
+      return json({ ok: true });
     }
     throw new ApiError("Endpoint tidak ditemukan.", 404);
   } catch (error) {
@@ -287,10 +345,69 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
   }
 }
 
-export async function PUT() {
-  return json({ error: "Method tidak diizinkan." }, 405, { Allow: "GET, POST" });
+export async function PUT(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
+  try {
+    const { path = [] } = await context.params;
+    const data = await body(request);
+    const sql = database();
+    if (path[0] === "quizzes" && path[1] && /^\d+$/.test(path[1])) {
+      const teacher = await requireUser(request, "teacher");
+      const quiz = validateQuiz(data);
+      const quizId = Number(path[1]);
+      const affected = await sql`WITH updated AS (
+        UPDATE quizzes SET title = ${quiz.title}, description = ${quiz.desc}, time_per_question = ${quiz.timePerQ}, questions = ${JSON.stringify(quiz.questions)}::jsonb
+        WHERE id = ${quizId} AND teacher_id = ${teacher.id}
+        RETURNING id
+      ), cleared AS (
+        DELETE FROM attempts WHERE assignment_id IN (SELECT id FROM assignments WHERE quiz_id = (SELECT id FROM updated))
+        RETURNING assignment_id
+      )
+      SELECT id, (SELECT COUNT(*) FROM cleared) AS cleared_attempts FROM updated LIMIT 1`;
+      if (!affected.length) throw new ApiError("Kuis tidak ditemukan.", 404);
+      return json({ ok: true, clearedAttempts: Number(affected[0].cleared_attempts) });
+    }
+    if (path[0] === "students" && path[1] && /^\d+$/.test(path[1])) {
+      const teacher = await requireUser(request, "teacher");
+      const studentId = Number(path[1]);
+      const existing = await sql`SELECT id, username FROM users WHERE id = ${studentId} AND teacher_id = ${teacher.id} AND role = 'student' LIMIT 1`;
+      if (!existing.length) throw new ApiError("Murid tidak ditemukan.", 404);
+      const name = typeof data.name === "string" ? data.name.trim() : "";
+      if (!name) throw new ApiError("Nama murid wajib diisi.", 400);
+      const username = typeof data.username === "string" ? data.username.trim().toLowerCase() : existing[0].username;
+      if (!isUsername(username)) throw new ApiError("Username murid tidak valid (3–30 karakter: huruf kecil, angka, _ . -).", 400);
+      const password = typeof data.password === "string" ? data.password : "";
+      if (password && password.length < 8) throw new ApiError("Password baru minimal 8 karakter (kosongkan bila tidak diubah).", 400);
+      const updated = password
+        ? await sql`UPDATE users SET name = ${name}, username = ${username}, password = ${await hashPassword(password)} WHERE id = ${studentId} RETURNING id, username, name`
+        : await sql`UPDATE users SET name = ${name}, username = ${username} WHERE id = ${studentId} RETURNING id, username, name`;
+      return json({ student: { id: Number(updated[0].id), username: updated[0].username, name: updated[0].name } });
+    }
+    throw new ApiError("Endpoint tidak ditemukan.", 404);
+  } catch (error) {
+    return routeError(error);
+  }
 }
 
-export async function DELETE() {
-  return json({ error: "Method tidak diizinkan." }, 405, { Allow: "GET, POST" });
+export async function DELETE(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
+  try {
+    const { path = [] } = await context.params;
+    const sql = database();
+    if (path[0] === "assignments" && path[1] && /^\d+$/.test(path[1])) {
+      const teacher = await requireUser(request, "teacher");
+      const assignmentId = Number(path[1]);
+      const deleted = await sql`DELETE FROM assignments a USING quizzes q WHERE a.id = ${assignmentId} AND a.quiz_id = q.id AND q.teacher_id = ${teacher.id} RETURNING a.id`;
+      if (!deleted.length) throw new ApiError("Tugas tidak ditemukan.", 404);
+      return json({ ok: true });
+    }
+    if (path[0] === "quizzes" && path[1] && /^\d+$/.test(path[1])) {
+      const teacher = await requireUser(request, "teacher");
+      const quizId = Number(path[1]);
+      const deleted = await sql`DELETE FROM quizzes WHERE id = ${quizId} AND teacher_id = ${teacher.id} RETURNING id`;
+      if (!deleted.length) throw new ApiError("Kuis tidak ditemukan.", 404);
+      return json({ ok: true });
+    }
+    throw new ApiError("Endpoint tidak ditemukan.", 404);
+  } catch (error) {
+    return routeError(error);
+  }
 }

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { neon } from "@neondatabase/serverless";
@@ -15,7 +15,11 @@ if (!connectionString) {
 }
 
 const sql = neon(connectionString);
-const migration = await readFile(resolve("migrations/001_initial_schema.sql"), "utf8");
+const files = readdirSync(resolve("migrations")).filter((file) => file.endsWith(".sql")).sort();
 
-await sql.transaction(migration.split(";").map((statement) => statement.trim()).filter(Boolean).map((statement) => sql.query(statement)));
+for (const file of files) {
+  const migration = await readFile(resolve("migrations", file), "utf8");
+  await sql.transaction(migration.split(";").map((statement) => statement.trim()).filter(Boolean).map((statement) => sql.query(statement)));
+  console.log(`Migration ${file} selesai.`);
+}
 console.log("Migration database selesai.");

@@ -1,0 +1,1 @@
+ALTER TABLE results ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '[]'::jsonb;
