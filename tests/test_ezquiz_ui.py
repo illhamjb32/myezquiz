@@ -49,6 +49,14 @@ class QuizEditorQuestionField(unittest.TestCase):
         self.assertIn("placeholder=", block, "Textarea pertanyaan butuh placeholder.")
         self.assertIn("required", block, "Textarea pertanyaan harus required.")
 
+    def test_question_newlines_are_preserved_in_student_player(self):
+        match = re.search(
+            r'<h3 className="([^"]*)whitespace-pre-wrap[^"]*">\{displayMultilineText\(question\.q\)\}</h3>',
+            self.source,
+        )
+        self.assertIsNotNone(match, "Teks soal di QuizPlayer tidak ditemukan.")
+        self.assertIn("animate-pop-in", match.group(1), "Teks soal harus tetap ikut animasi masuk.")
+
 
 class StudentMotionPack(unittest.TestCase):
     """Sisi murid harus punya set animasi yang kaya dan tidak cuma dasar."""

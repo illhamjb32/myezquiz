@@ -561,6 +561,56 @@ button:disabled {
 
 .sparkle-bit { animation: sparkle-twinkle 1.8s ease-in-out infinite; }
 
+/* ---- Student motion pack v2: entry choreography + micro-interactions ---- */
+.student-stat-card { will-change: transform, opacity; }
+.student-stat-card:nth-child(1) .student-stat-icon { animation: glow-pulse 2.6s ease-in-out infinite; }
+.student-stat-card:nth-child(3) .student-stat-icon { animation: float-soft 3.4s ease-in-out infinite; }
+
+@keyframes task-swing {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-10deg); }
+  55% { transform: rotate(9deg); }
+  80% { transform: rotate(-4deg); }
+}
+.student-task-card:hover .task-swing-icon { animation: task-swing 0.55s ease-in-out infinite; }
+.student-task-card:hover { transform: translateY(-2px); box-shadow: 0 12px 24px rgba(20, 22, 30, 0.07); }
+.student-task-card { transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
+
+@keyframes leader-sheen {
+  from { background-position: -120% 0; }
+  to { background-position: 220% 0; }
+}
+.student-leader-card { background-size: 220% 100%; }
+.student-leader-card:hover { background-position: 0 0; }
+.student-leader-card:first-child .student-leader-avatar {
+  animation: glow-pulse 2.4s ease-in-out infinite;
+  border-color: rgba(255, 195, 87, 0.55);
+}
+
+@keyframes bumpy-bounce {
+  0%, 100% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(-4px) scale(1.04); }
+  55% { transform: translateY(1px) scale(0.98); }
+}
+.welcome-avatar-bump { animation: bumpy-bounce 2.8s ease-in-out infinite; }
+
+/* Kilau latar yang menyapu kartu pencapaian */
+@keyframes sheen-sweep {
+  0% { transform: translateX(-140%) skewX(-16deg); }
+  100% { transform: translateX(240%) skewX(-16deg); }
+}
+.student-achievement-sheen { position: relative; overflow: hidden; }
+.student-achievement-sheen::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 38%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: sheen-sweep 2.8s ease-in-out infinite;
+  content: "";
+}
+
 /* Kilau yang menyapu isi progress bar kuis */
 .progress-sheen { position: relative; overflow: hidden; }
 .progress-sheen::after {
