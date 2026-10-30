@@ -39,6 +39,7 @@ import {
 } from "lucide-react";
 
 import { ConfirmDialog } from "./ConfirmDialog";
+import { badgeStates, levelFor as levelForXp, type BadgeResult } from "../lib/gamification";
 
 type User = { id: number; username: string; name: string; role: "teacher" | "student"; xp: number };
 type Question = { q: string; options: string[]; answer?: number; points?: number; explanation?: string; image?: string; optionImages?: Array<string | null> };
@@ -168,8 +169,7 @@ function displayMultilineText(value: string) {
 }
 
 function levelFor(xp: number) {
-  const safeXp = Math.max(xp || 0, 0);
-  return { level: Math.floor(safeXp / 500) + 1, current: safeXp % 500, next: 500 };
+  return levelForXp(xp);
 }
 
 function Brand({ light = false }: { light?: boolean }) {
@@ -323,6 +323,15 @@ function PanelHeading({ eyebrow, title, action }: { eyebrow?: string; title: str
 function StatCard({ icon, label, value, helper, tone = "orange", trend, animated = false, delay = 0 }: { icon: React.ReactNode; label: string; value: string | number; helper: string; tone?: "orange" | "purple" | "green" | "blue"; trend?: string; animated?: boolean; delay?: number }) {
   const themes = { orange: "bg-[#fff0eb] text-[#f16847]", purple: "bg-[#f1edff] text-[#775ce8]", green: "bg-[#eaf8f0] text-[#36a56f]", blue: "bg-[#eaf3ff] text-[#4c83df]" };
   return <article style={animated ? { animationDelay: `${delay}ms` } : undefined} className={cx("rounded-[17px] border border-[#e9e9ec] bg-white p-4 shadow-[0_3px_14px_rgba(20,22,30,0.025)] sm:p-5", animated && "animate-rise student-stat-card")}><div className="flex items-start justify-between gap-2"><span className={cx("grid size-10 place-items-center rounded-xl", themes[tone], animated && "student-stat-icon")}>{icon}</span>{trend && <span className="flex items-center gap-1 rounded-md bg-[#eaf8f0] px-2 py-1 text-[9px] font-bold text-[#299260]"><ArrowUpRight size={12} />{trend}</span>}</div><p className="mt-4 text-[10px] font-semibold text-[#96969e]">{label}</p><strong className={cx("mt-0.5 block text-[27px] font-black leading-tight tracking-[-1px] text-[#22232a]", animated && "animate-count")}>{value}</strong><p className="mt-1 text-[9px] font-medium text-[#a5a5ac]">{helper}</p></article>;
+}
+
+function GamificationCard({ xp, history }: { xp: number; history: HistoryEntry[] }) {
+  const progress = levelForXp(xp);
+  const results: BadgeResult[] = history.map((entry) => ({ correct: entry.correct, total: entry.total, earnedXP: entry.earnedXP, answers: entry.answers }));
+  const badges = badgeStates(results, xp);
+  const unlocked = badges.filter((badge) => badge.unlocked).length;
+  const percent = progress.has_next ? Math.min(100, Math.round((progress.current / progress.next) * 100)) : 100;
+  return <Panel className="overflow-hidden"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><SectionLabel>PROFIL PROGRES</SectionLabel><div className="mt-1 flex items-center gap-2"><span className="text-2xl" aria-hidden="true">{progress.badge}</span><div><h3 className="text-[17px] font-black text-[#292a30]">Level {progress.level} · {progress.title}</h3><p className="text-[10px] text-[#96969e]">{progress.has_next ? `${progress.next - progress.current} XP lagi menuju ${progress.next_title}` : "Level maksimum tercapai"}</p></div></div></div><div className="rounded-xl bg-[#fff7df] px-3 py-2 text-center"><b className="block text-[15px] font-black text-[#c58820]">{xp.toLocaleString("id-ID")} XP</b><small className="text-[9px] font-bold text-[#b39458]">{unlocked}/{badges.length} badge terbuka</small></div></div><div className="mt-4"><div className="mb-1 flex justify-between text-[9px] font-bold text-[#92929a]"><span>Progres level</span><span>{progress.has_next ? `${progress.current.toLocaleString("id-ID")} / ${progress.next.toLocaleString("id-ID")} XP` : "MAX"}</span></div><div className="h-2 overflow-hidden rounded-full bg-[#f0f0f2]"><div className="h-full rounded-full bg-gradient-to-r from-[#ff9d45] to-[#ff6846] transition-all" style={{ width: `${percent}%` }} /></div></div><div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">{badges.map((badge) => <div key={badge.key} title={badge.description} className={cx("rounded-xl border p-2.5 transition", badge.unlocked ? "border-[#ffe0a8] bg-[#fffaf0]" : "border-[#eeeeF1] bg-[#fafafa] opacity-60")}><div className="flex items-center gap-2"><span className={cx("grid size-7 place-items-center rounded-lg text-base", badge.unlocked ? "bg-[#fff0c7]" : "bg-[#eeeeef] grayscale")}>{badge.emoji}</span><div className="min-w-0"><b className="block truncate text-[9px] font-extrabold text-[#4b4b53]">{badge.name}</b><small className="block truncate text-[8px] text-[#9b9ba2]">{badge.unlocked ? "Terbuka" : `${Math.min(badge.current, badge.target)}/${badge.target}`}</small></div></div></div>)}</div></Panel>;
 }
 
 function Leaderboard({ leaders }: { leaders: Leader[] }) {
@@ -766,7 +775,8 @@ export default function EzQuizApp() {
 
   function studentHome() {
     return <div className="space-y-5"><WelcomeBanner user={user!} xp={level} />
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3"><StatCard animated delay={90} icon={<Zap size={18} />} label="TOTAL XP" value={user!.xp.toLocaleString("id-ID")} helper="XP yang sudah kamu kumpulkan" tone="orange" trend="Naik level" /><StatCard animated delay={170} icon={<Award size={18} />} label="LEVEL SAAT INI" value={level.level} helper={`${level.next - level.current} XP menuju level berikutnya`} tone="purple" /><StatCard animated delay={250} icon={<Target size={18} />} label="KUIS MENUNGGU" value={pendingCount} helper={`${completedCount} tantangan sudah selesai`} tone="green" /></div>
+      <GamificationCard xp={user!.xp} history={history} />
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3"><StatCard animated delay={90} icon={<Zap size={18} />} label="TOTAL XP" value={user!.xp.toLocaleString("id-ID")} helper="XP yang sudah kamu kumpulkan" tone="orange" trend="Naik level" /><StatCard animated delay={170} icon={<Award size={18} />} label="LEVEL SAAT INI" value={`${level.level} · ${level.title}`} helper={level.has_next ? `${level.next - level.current} XP menuju level berikutnya` : "Level maksimum tercapai"} tone="purple" /><StatCard animated delay={250} icon={<Target size={18} />} label="KUIS MENUNGGU" value={pendingCount} helper={`${completedCount} tantangan sudah selesai`} tone="green" /></div>
       <div className="grid gap-4 lg:grid-cols-[1.55fr_0.85fr]"><Panel><PanelHeading eyebrow="TANTANGAN KELAS" title="Kuis untukmu" action={<Pill tone="orange">{assignments.length} kuis</Pill>} /><AssignmentList assignments={assignments.slice(0, 5)} onPlay={setPlayingId} /></Panel><Leaderboard leaders={leaders} /></div>
     </div>;
   }
