@@ -331,7 +331,58 @@ function GamificationCard({ xp, history }: { xp: number; history: HistoryEntry[]
   const badges = badgeStates(results, xp);
   const unlocked = badges.filter((badge) => badge.unlocked).length;
   const percent = progress.has_next ? Math.min(100, Math.round((progress.current / progress.next) * 100)) : 100;
-  return <Panel className="overflow-hidden"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><SectionLabel>PROFIL PROGRES</SectionLabel><div className="mt-1 flex items-center gap-2"><span className="text-2xl" aria-hidden="true">{progress.badge}</span><div><h3 className="text-[17px] font-black text-[#292a30]">Level {progress.level} · {progress.title}</h3><p className="text-[10px] text-[#96969e]">{progress.has_next ? `${progress.next - progress.current} XP lagi menuju ${progress.next_title}` : "Level maksimum tercapai"}</p></div></div></div><div className="rounded-xl bg-[#fff7df] px-3 py-2 text-center"><b className="block text-[15px] font-black text-[#c58820]">{xp.toLocaleString("id-ID")} XP</b><small className="text-[9px] font-bold text-[#b39458]">{unlocked}/{badges.length} badge terbuka</small></div></div><div className="mt-4"><div className="mb-1 flex justify-between text-[9px] font-bold text-[#92929a]"><span>Progres level</span><span>{progress.has_next ? `${progress.current.toLocaleString("id-ID")} / ${progress.next.toLocaleString("id-ID")} XP` : "MAX"}</span></div><div className="h-2 overflow-hidden rounded-full bg-[#f0f0f2]"><div className="h-full rounded-full bg-gradient-to-r from-[#ff9d45] to-[#ff6846] transition-all" style={{ width: `${percent}%` }} /></div></div><div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">{badges.map((badge) => <div key={badge.key} title={badge.description} className={cx("rounded-xl border p-2.5 transition", badge.unlocked ? "border-[#ffe0a8] bg-[#fffaf0]" : "border-[#eeeeF1] bg-[#fafafa] opacity-60")}><div className="flex items-center gap-2"><span className={cx("grid size-7 place-items-center rounded-lg text-base", badge.unlocked ? "bg-[#fff0c7]" : "bg-[#eeeeef] grayscale")}>{badge.emoji}</span><div className="min-w-0"><b className="block truncate text-[9px] font-extrabold text-[#4b4b53]">{badge.name}</b><small className="block truncate text-[8px] text-[#9b9ba2]">{badge.unlocked ? "Terbuka" : `${Math.min(badge.current, badge.target)}/${badge.target}`}</small></div></div></div>)}</div></Panel>;
+  const fmt = (value: number) => value.toLocaleString("id-ID");
+  return (
+    <Panel className="overflow-hidden">
+      <div className="p-5 sm:p-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-[#ff9d45] to-[#ff6846] text-2xl shadow-[0_8px_18px_rgba(255,104,70,0.3)]" aria-hidden="true">{progress.badge}</span>
+            <div className="min-w-0">
+              <SectionLabel>PROFIL PROGRES</SectionLabel>
+              <h3 className="mt-0.5 text-[18px] font-black tracking-[-0.4px] text-[#26272e]">Level {progress.level} · {progress.title}</h3>
+              <p className="mt-0.5 truncate text-[11px] font-medium text-[#96969e]">{progress.has_next ? `${fmt(progress.next - progress.current)} XP lagi menuju ${progress.next_title}` : "Level maksimum tercapai 🎉"}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 sm:flex-col sm:items-end sm:gap-1">
+            <span className="inline-flex items-center gap-1.5 rounded-xl bg-[#fff6e2] px-3.5 py-2 text-[15px] font-black text-[#c58820]"><Zap size={14} fill="currentColor" />{fmt(xp)} XP</span>
+            <span className="text-[10px] font-bold text-[#a5a5ac]">{unlocked}/{badges.length} badge terbuka</span>
+          </div>
+        </div>
+        <div className="mt-5">
+          <div className="mb-1.5 flex items-baseline justify-between">
+            <span className="text-[10px] font-bold text-[#85858d]">Progres level</span>
+            <span className="text-[11px] font-extrabold text-[#5b5c64]">{progress.has_next ? <>{fmt(progress.current)} <span className="font-medium text-[#a5a5ac]">/ {fmt(progress.next)} XP</span></> : "MAX 🏆"}</span>
+          </div>
+          <div className="h-3 overflow-hidden rounded-full bg-[#f0f0f2] p-0.5"><div className="progress-sheen h-full rounded-full bg-gradient-to-r from-[#ff9d45] to-[#ff6846] transition-all duration-500" style={{ width: `${Math.max(percent, 4)}%` }} /></div>
+          {progress.has_next && <p className="mt-1.5 text-right text-[9px] font-bold text-[#c9c9cf]">{percent}%</p>}
+        </div>
+      </div>
+      <div className="border-t border-[#f1f1f3] bg-[#fbfbfc] px-5 py-4 sm:px-6">
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-[10px] font-extrabold tracking-[1.2px] text-[#a1a1a9]">KOLEKSI BADGE</span>
+          <Pill tone="orange">{unlocked}/{badges.length}</Pill>
+        </div>
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+          {badges.map((badge) => {
+            const ratio = Math.min(badge.current / badge.target, 1);
+            return (
+              <div key={badge.key} title={badge.description} className={cx("rounded-2xl border p-3 transition", badge.unlocked ? "border-[#ffd98f] bg-gradient-to-br from-[#fffaf0] to-[#fff5e0] shadow-[0_3px_10px_rgba(224,161,35,0.12)]" : "border-[#ececef] bg-white")}>
+                <div className="flex items-center gap-2.5">
+                  <span className={cx("grid size-9 shrink-0 place-items-center rounded-xl text-lg", badge.unlocked ? "bg-[#fff0c7]" : "bg-[#f2f2f4] opacity-45 grayscale")}>{badge.emoji}</span>
+                  <div className="min-w-0 flex-1">
+                    <b className={cx("block truncate text-[10px] font-extrabold leading-tight", badge.unlocked ? "text-[#4b4b53]" : "text-[#8d8d95]")}>{badge.name}</b>
+                    {badge.unlocked ? <span className="mt-0.5 inline-flex items-center gap-1 text-[9px] font-black text-[#299260]"><Check size={10} strokeWidth={3} />Terbuka</span> : <small className="mt-0.5 block text-[9px] font-bold text-[#a9a9b0]">{Math.min(badge.current, badge.target).toLocaleString("id-ID")}/{badge.target.toLocaleString("id-ID")}</small>}
+                  </div>
+                </div>
+                {!badge.unlocked && <div className="mt-2 h-1 overflow-hidden rounded-full bg-[#f0f0f2]"><div className="h-full rounded-full bg-[#d8d8dd]" style={{ width: `${Math.round(ratio * 100)}%` }} /></div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </Panel>
+  );
 }
 
 function Leaderboard({ leaders }: { leaders: Leader[] }) {
@@ -399,7 +450,7 @@ function AnalyticsSection({ analytics, error }: { analytics: Analytics | null; e
   </Panel>;
 }
 
-function WelcomeBanner({ user, teacher, onCreate, xp }: { user: User; teacher?: boolean; onCreate?: () => void; xp?: { level: number; current: number; next: number } }) {
+function WelcomeBanner({ user, teacher, onCreate, xp }: { user: User; teacher?: boolean; onCreate?: () => void; xp?: { level: number; title?: string; current: number; next: number; has_next?: boolean } }) {
   const firstName = user.name.trim().split(/\s+/)[0];
   return <section className={cx("relative min-h-[206px] overflow-hidden rounded-[22px] bg-[#24252b] p-6 text-white shadow-[0_10px_25px_rgba(24,25,30,0.12)] sm:p-8 lg:px-10 lg:py-8", !teacher && "animate-aurora bg-[linear-gradient(115deg,#24252b,#322d48,#24252b)]")}>
     {!teacher && <StudentSparkles />}
@@ -409,7 +460,7 @@ function WelcomeBanner({ user, teacher, onCreate, xp }: { user: User; teacher?: 
       <span className="inline-flex items-center gap-1.5 rounded-md bg-white/[0.08] px-2.5 py-1.5 text-[9px] font-extrabold tracking-[1.35px] text-[#ffb5a3]">{teacher ? <GraduationCap size={12} /> : <Sparkles size={12} />}{teacher ? "RUANG GURU" : "RUANG BELAJARMU"}</span>
       <h2 className="mt-4 text-[27px] font-black leading-tight tracking-[-1px] sm:text-[34px]">{teacher ? "Hai, " : "Terus berkembang, "}<span className="text-[#ff8060]">{firstName}.</span></h2>
       <p className="mt-2 max-w-[460px] text-[11px] leading-5 text-[#b4b4ba] sm:text-[12px]">{teacher ? "Siap bikin sesi belajar hari ini jadi lebih seru?" : "Setiap jawaban benar membawamu satu langkah lebih dekat ke level berikutnya."}</p>
-      {teacher && onCreate ? <Button variant="light" className="mt-5 !min-h-9 !px-3.5 !text-[11px]" onClick={onCreate}><Plus size={14} /> Buat kuis baru</Button> : xp && <div className="animate-pop-in mt-5 max-w-[380px] rounded-2xl border border-white/10 bg-white/5 p-3.5 backdrop-blur-md"><div className="mb-2 flex items-center justify-between text-[10px] font-extrabold tracking-wide text-white"><span><span className="text-[#ff9c82]">LEVEL {xp.level}</span> · Super Learner</span><span className="flex items-center gap-1 text-[#ffd385]"><Flame className="animate-flame" size={12} fill="currentColor" />{xp.current} / {xp.next} XP</span></div><div className="progress-sheen h-2.5 overflow-hidden rounded-full bg-white/15 p-0.5"><div className="h-full rounded-full bg-gradient-to-r from-[#ff886a] via-[#ff6846] to-[#ffd175] transition-all duration-500 shadow-[0_0_10px_rgba(255,104,70,0.5)]" style={{ width: `${(xp.current / xp.next) * 100}%` }} /></div></div>}
+      {teacher && onCreate ? <Button variant="light" className="mt-5 !min-h-9 !px-3.5 !text-[11px]" onClick={onCreate}><Plus size={14} /> Buat kuis baru</Button> : xp && <div className="animate-pop-in mt-5 max-w-[380px] rounded-2xl border border-white/10 bg-white/5 p-3.5 backdrop-blur-md"><div className="mb-2 flex items-center justify-between text-[10px] font-extrabold tracking-wide text-white"><span><span className="text-[#ff9c82]">LEVEL {xp.level}</span> · {xp.title ?? "Super Learner"}</span><span className="flex items-center gap-1 text-[#ffd385]"><Flame className="animate-flame" size={12} fill="currentColor" />{xp.has_next === false ? "MAX" : `${xp.current} / ${xp.next} XP`}</span></div><div className="progress-sheen h-2.5 overflow-hidden rounded-full bg-white/15 p-0.5"><div className="h-full rounded-full bg-gradient-to-r from-[#ff886a] via-[#ff6846] to-[#ffd175] transition-all duration-500 shadow-[0_0_10px_rgba(255,104,70,0.5)]" style={{ width: `${xp.has_next === false ? 100 : Math.min(100, Math.max(4, Math.round((xp.current / Math.max(xp.next, 1)) * 100)))}%` }} /></div></div>}
     </div>
     <div className="absolute bottom-0 right-[8%] top-0 hidden w-44 items-center justify-center sm:flex"><span className="absolute size-[145px] rounded-full border border-white/[0.08]" /><span className="absolute size-[103px] rounded-full border border-white/[0.1]" /><span className="grid size-[66px] rotate-[-8deg] place-items-center rounded-[20px] bg-gradient-to-br from-[#ff886a] to-[#ee5436] shadow-[0_14px_35px_rgba(255,104,70,0.26)]"><span className="text-[30px]">{teacher ? "✦" : "⚡"}</span></span><span className="absolute right-4 top-11 text-lg text-[#ffd182]">✳</span><span className="absolute bottom-10 left-4 text-sm text-[#ff9e86]">✦</span></div>
   </section>;
