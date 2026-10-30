@@ -38,11 +38,15 @@ import {
   Zap,
 } from "lucide-react";
 
+import { ConfirmDialog } from "./ConfirmDialog";
+
 type User = { id: number; username: string; name: string; role: "teacher" | "student"; xp: number };
 type Question = { q: string; options: string[]; answer?: number; points?: number; explanation?: string; image?: string; optionImages?: Array<string | null> };
 type QuizDraftQuestion = { q: string; options: string[]; answer: number; points: number; explanation?: string; image?: string; optionImages?: Array<string | null> };
 type QuizDraft = { title: string; desc: string; timePerQ: number; questions: QuizDraftQuestion[] };
-type Quiz = { id: number; title: string; desc: string; timePerQ: number; questions: Question[]; assignmentId?: number; dueDate?: string | null; earnedXP?: number | null; resultCorrect?: number | null; resultTotal?: number | null; isAttempting?: boolean };
+type AssignmentStatus = "done" | "attempting" | "pending" | "overdue" | "due_today";
+type AssignmentFilter = "all" | "unfinished" | "overdue" | "done";
+type Quiz = { id: number; title: string; desc: string; timePerQ: number; questions: Question[]; assignmentId?: number; dueDate?: string | null; earnedXP?: number | null; resultCorrect?: number | null; resultTotal?: number | null; isAttempting?: boolean; status?: AssignmentStatus };
 type Student = { id: number; username: string; name: string; xp: number };
 type Leader = { name: string; xp: number };
 type View = "home" | "quizzes" | "students" | "assignments" | "history";
@@ -51,8 +55,11 @@ type ApiError = Error & { status?: number };
 type QuizAnswer = { isCorrect: boolean; correctAnswer: number; gain: number; xp: number; streak: number; finished: boolean; correct: number; total: number; nextQuestion: number; explanation?: string; answeredCount?: number; unansweredCount?: number };
 type AnswerRec = { selected: number | null; isCorrect: boolean; gain: number };
 type HistoryEntry = { assignmentId: number; quizId: number; title: string; desc: string; timePerQ: number; dueDate: string | null; resultId: number; correct: number; total: number; earnedXP: number; completedAt: string; questions: Question[]; answers: AnswerRec[] };
-type TeacherAssignment = { assignmentId: number; quizId: number; studentId: number; studentName: string; studentUsername: string; dueDate: string | null; earnedXP: number | null; resultCorrect: number | null; resultTotal: number | null; completedAt: string | null; isAttempting: boolean };
-type StudentTask = { assignmentId: number; quizId: number; quizTitle: string; dueDate: string | null; earnedXP: number | null; resultCorrect: number | null; resultTotal: number | null; isAttempting: boolean };
+type TeacherAssignment = { assignmentId: number; quizId: number; studentId: number; studentName: string; studentUsername: string; dueDate: string | null; earnedXP: number | null; resultCorrect: number | null; resultTotal: number | null; completedAt: string | null; isAttempting: boolean; status?: AssignmentStatus };
+type StudentTask = { assignmentId: number; quizId: number; quizTitle: string; dueDate: string | null; earnedXP: number | null; resultCorrect: number | null; resultTotal: number | null; isAttempting: boolean; status?: AssignmentStatus };
+type AnalyticsPerQuestion = { quizId: number; quizTitle: string; questionIndex: number; correctCount: number; answeredCount: number; correctRate: number };
+type AnalyticsStudent = { studentId: number; name: string; xp: number; completed: number; total: number; averagePercent: number; needsAttention: boolean };
+type Analytics = { completedCount: number; totalAssignments: number; completionRate: number; classAveragePercent: number; perQuestion: AnalyticsPerQuestion[]; students: AnalyticsStudent[] };
 
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(" ");
 
@@ -186,6 +193,18 @@ function Button({ children, variant = "primary", className, ...props }: React.Bu
     ghost: "bg-transparent text-[#777985] hover:bg-[#f3f3f4] hover:text-[#292a33]",
   };
   return <button className={cx("inline-flex min-h-10 items-center justify-center gap-2 rounded-xl px-4 text-[13px] font-bold transition-all disabled:opacity-55", styles[variant], className)} {...props}>{children}</button>;
+}
+
+const STATUS_LABELS: Record<AssignmentStatus, string> = { done: "Selesai", attempting: "Sedang dikerjakan", pending: "Belum dikerjakan", overdue: "Terlambat", due_today: "Jatuh tempo hari ini" };
+const STATUS_TONES: Record<AssignmentStatus, string> = { done: "bg-[#d5f3e1] text-[#238253]", attempting: "bg-[#fff3c9] text-[#9a7207]", pending: "bg-[#f0f0f2] text-[#767680]", overdue: "bg-[#ffe0dc] text-[#b7463e]", due_today: "bg-[#fff0eb] text-[#e85d3b]" };
+
+function StatusBadge({ status, fallback }: { status?: AssignmentStatus; fallback?: AssignmentStatus }) {
+  const value = status ?? fallback ?? "pending";
+  return <span className={cx("inline-flex whitespace-nowrap rounded-full px-2.5 py-0.5 text-[9px] font-extrabold", STATUS_TONES[value])}>{STATUS_LABELS[value]}</span>;
+}
+
+function statusOf(item: { status?: AssignmentStatus; earnedXP: number | null; isAttempting: boolean }): AssignmentStatus {
+  return item.status ?? (item.earnedXP !== null ? "done" : item.isAttempting ? "attempting" : "pending");
 }
 
 function Pill({ children, tone = "neutral" }: { children: React.ReactNode; tone?: "neutral" | "orange" | "green" | "purple" }) {
@@ -335,6 +354,42 @@ function StudentSparkles() {
   </span>;
 }
 
+const ASSIGNMENT_FILTERS: Array<{ id: AssignmentFilter; label: string }> = [
+  { id: "all", label: "Semua" },
+  { id: "unfinished", label: "Belum selesai" },
+  { id: "overdue", label: "Terlambat" },
+  { id: "done", label: "Selesai" },
+];
+
+function AnalyticsStat({ label, value, helper, tone = "orange" }: { label: string; value: string; helper: string; tone?: "orange" | "purple" | "green" }) {
+  const tones = { orange: "bg-[#fff0eb] text-[#f16847]", purple: "bg-[#f1edff] text-[#775ce8]", green: "bg-[#eaf8f0] text-[#36a56f]" };
+  return <div className="rounded-xl border border-[#ececef] bg-[#fafafb] p-3.5"><div className="flex items-center justify-between gap-2"><SectionLabel>{label}</SectionLabel><span className={cx("grid size-6 place-items-center rounded-lg", tones[tone])}><Zap size={11} className="opacity-0" /></span></div><b className="mt-1.5 block text-[20px] font-black tracking-[-.6px] text-[#26272e]">{value}</b><span className="mt-0.5 block text-[9px] font-semibold text-[#a0a0a7]">{helper}</span></div>;
+}
+
+function AnalyticsSection({ analytics, error }: { analytics: Analytics | null; error: string }) {
+  if (error) return <Panel><PanelHeading eyebrow="WAWASAN KELAS" title="Analitik pembelajaran" /><p role="alert" className="px-5 pb-5 text-[11px] font-semibold text-[#b94b3b] sm:px-6">Analitik belum bisa dimuat: {error}</p></Panel>;
+  if (!analytics) return <Panel><PanelHeading eyebrow="WAWASAN KELAS" title="Analitik pembelajaran" /><div className="flex items-center gap-2 px-5 pb-5 text-[10px] font-semibold text-[#898991] sm:px-6"><LoaderCircle className="animate-spin text-[#ff6846]" size={14} /> Menghitung analitik kelas...</div></Panel>;
+  const answered = analytics.perQuestion.filter((item) => item.answeredCount > 0);
+  const hardest = [...answered].sort((a, b) => a.correctRate - b.correctRate || a.answeredCount - b.answeredCount).slice(0, 5);
+  const attention = analytics.students.filter((student) => student.needsAttention);
+  return <Panel>
+    <PanelHeading eyebrow="WAWASAN KELAS" title="Analitik pembelajaran" action={<Pill tone="purple"><Target size={12} /> {Math.round(analytics.completionRate)}% selesai</Pill>} />
+    <div className="grid gap-3 px-5 pb-4 sm:grid-cols-3 sm:px-6">
+      <AnalyticsStat label="PENYELESAIAN" value={`${analytics.completedCount}/${analytics.totalAssignments}`} helper={`${Math.round(analytics.completionRate)}% tugas sudah selesai`} tone="green" />
+      <AnalyticsStat label="RATA-RATA KELAS" value={`${Math.round(analytics.classAveragePercent)}%`} helper="Rata-rata nilai hasil kuis" tone="orange" />
+      <AnalyticsStat label="PERLU PERHATIAN" value={String(attention.length)} helper="Murid dengan progres rendah" tone="purple" />
+    </div>
+    <div className="grid gap-4 px-5 pb-6 sm:px-6 lg:grid-cols-2">
+      <div><SectionLabel>SOAL TERSET</SectionLabel>
+        {!hardest.length ? <p className="mt-2 rounded-xl border border-[#ececef] bg-[#fafafb] p-3.5 text-[10px] font-semibold text-[#92939a]">Belum ada jawaban murid untuk dianalisis.</p> : <div className="mt-2 space-y-2">{hardest.map((item) => <div key={`${item.quizId}-${item.questionIndex}`} className="rounded-xl border border-[#ececef] bg-[#fafafb] p-3"><div className="flex items-center justify-between gap-2"><b className="min-w-0 flex-1 truncate text-[10px] font-extrabold text-[#383941]">Soal {item.questionIndex + 1} · {item.quizTitle}</b><span className={cx("shrink-0 rounded-full px-2 py-0.5 text-[9px] font-extrabold", item.correctRate < 50 ? "bg-[#ffe0dc] text-[#b7463e]" : "bg-[#fff3c9] text-[#9a7207]")}>{Math.round(item.correctRate)}% benar</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#ededf0]"><div className="h-full rounded-full bg-[#ff6846]" style={{ width: `${Math.max(2, Math.min(100, item.correctRate))}%` }} /></div><span className="mt-1.5 block text-[9px] font-semibold text-[#a0a0a7]">{item.correctCount} benar dari {item.answeredCount} jawaban</span></div>)}</div>}
+      </div>
+      <div><SectionLabel>MURID PERLU PERHATIAN</SectionLabel>
+        {!attention.length ? <p className="mt-2 rounded-xl border border-[#ececef] bg-[#fafafb] p-3.5 text-[10px] font-semibold text-[#92939a]">Semua murid berada di jalur yang baik.</p> : <div className="mt-2 space-y-2">{attention.map((student) => <div key={student.studentId} className="flex items-center gap-3 rounded-xl border border-[#f5d5cf] bg-[#fff8f6] p-3"><Avatar name={student.name} small /><span className="min-w-0 flex-1"><b className="block truncate text-[10px] font-extrabold text-[#383941]">{student.name}</b><small className="mt-0.5 block text-[9px] text-[#a08d89]">{student.completed}/{student.total} tugas · rata-rata {Math.round(student.averagePercent)}%</small></span><Pill tone="orange">{student.xp.toLocaleString("id-ID")} XP</Pill></div>)}</div>}
+      </div>
+    </div>
+  </Panel>;
+}
+
 function WelcomeBanner({ user, teacher, onCreate, xp }: { user: User; teacher?: boolean; onCreate?: () => void; xp?: { level: number; current: number; next: number } }) {
   const firstName = user.name.trim().split(/\s+/)[0];
   return <section className={cx("relative min-h-[206px] overflow-hidden rounded-[22px] bg-[#24252b] p-6 text-white shadow-[0_10px_25px_rgba(24,25,30,0.12)] sm:p-8 lg:px-10 lg:py-8", !teacher && "animate-aurora bg-[linear-gradient(115deg,#24252b,#322d48,#24252b)]")}>
@@ -351,19 +406,19 @@ function WelcomeBanner({ user, teacher, onCreate, xp }: { user: User; teacher?: 
   </section>;
 }
 
-function QuizRows({ quizzes, onAssign, onEdit }: { quizzes: Quiz[]; onAssign: (id: number) => void; onEdit: (quiz: Quiz) => void }) {
+function QuizRows({ quizzes, onAssign, onEdit, onDuplicate }: { quizzes: Quiz[]; onAssign: (id: number) => void; onEdit: (quiz: Quiz) => void; onDuplicate: (id: number) => void }) {
   if (!quizzes.length) return <EmptyState icon={<BookOpen size={21} />} title="Belum ada kuis" text="Buat kuis pertamamu untuk memulai." />;
-  return <div className="overflow-x-auto"><table className="w-full min-w-[510px] text-left"><thead><tr className="border-y border-[#f0f0f2] bg-[#fafafb] text-[8px] font-extrabold tracking-[1px] text-[#a1a1a8]"><th className="px-5 py-3 font-extrabold">JUDUL KUIS</th><th className="px-4 py-3 font-extrabold">SOAL</th><th className="px-4 py-3 font-extrabold">WAKTU</th><th className="px-5 py-3 text-right font-extrabold">AKSI</th></tr></thead><tbody>{quizzes.map((quiz) => <tr key={quiz.id} className="border-b border-[#f1f1f2] last:border-0 hover:bg-[#fffdfa]"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-[#fff0eb] text-[#f16b4b]"><BookOpen size={15} /></span><span className="min-w-0"><b className="block max-w-[230px] truncate text-[11px] font-extrabold text-[#35363d]">{quiz.title}</b><small className="mt-1 block max-w-[230px] truncate text-[9px] text-[#a0a0a7]">{quiz.desc || "Tanpa deskripsi"}</small></span></div></td><td className="px-4 py-3.5 text-[10px] font-semibold text-[#777780]">{quiz.questions.length} soal</td><td className="px-4 py-3.5 text-[10px] font-semibold text-[#777780]">{quiz.timePerQ} dtk</td><td className="px-5 py-3.5 text-right"><div className="flex items-center justify-end gap-1.5"><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" onClick={() => onEdit(quiz)}><Pencil size={11} /> Ubah</Button><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" onClick={() => onAssign(quiz.id)}>Tugaskan <ArrowRight size={11} /></Button></div></td></tr>)}</tbody></table></div>;
+  return <div className="overflow-x-auto"><table className="w-full min-w-[510px] text-left"><thead><tr className="border-y border-[#f0f0f2] bg-[#fafafb] text-[8px] font-extrabold tracking-[1px] text-[#a1a1a8]"><th className="px-5 py-3 font-extrabold">JUDUL KUIS</th><th className="px-4 py-3 font-extrabold">SOAL</th><th className="px-4 py-3 font-extrabold">WAKTU</th><th className="px-5 py-3 text-right font-extrabold">AKSI</th></tr></thead><tbody>{quizzes.map((quiz) => <tr key={quiz.id} className="border-b border-[#f1f1f2] last:border-0 hover:bg-[#fffdfa]"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-[#fff0eb] text-[#f16b4b]"><BookOpen size={15} /></span><span className="min-w-0"><b className="block max-w-[230px] truncate text-[11px] font-extrabold text-[#35363d]">{quiz.title}</b><small className="mt-1 block max-w-[230px] truncate text-[9px] text-[#a0a0a7]">{quiz.desc || "Tanpa deskripsi"}</small></span></div></td><td className="px-4 py-3.5 text-[10px] font-semibold text-[#777780]">{quiz.questions.length} soal</td><td className="px-4 py-3.5 text-[10px] font-semibold text-[#777780]">{quiz.timePerQ} dtk</td><td className="px-5 py-3.5 text-right"><div className="flex items-center justify-end gap-1.5"><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" onClick={() => onEdit(quiz)}><Pencil size={11} /> Ubah</Button><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" onClick={() => onDuplicate(quiz.id)} aria-label={`Duplikat kuis ${quiz.title}`}><Copy size={11} /> Duplikat</Button><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" onClick={() => onAssign(quiz.id)}>Tugaskan <ArrowRight size={11} /></Button></div></td></tr>)}</tbody></table></div>;
 }
 
 function AssignmentList({ assignments, onPlay }: { assignments: Quiz[]; onPlay: (assignmentId: number) => void }) {
   if (!assignments.length) return <EmptyState icon={<Target size={21} />} title="Belum ada tugas kuis" text="Guru akan menambahkan kuis untukmu di sini." />;
-  return <div className="grid gap-3 px-5 pb-5 pt-3 sm:px-6">{assignments.map((quiz, index) => { const complete = quiz.earnedXP != null; return <div key={quiz.assignmentId} style={{ animationDelay: `${index * 80}ms` }} className={cx("student-task-card animate-rise group relative flex flex-wrap items-center gap-3.5 overflow-hidden rounded-2xl border p-4 transition-all duration-200 sm:flex-nowrap", complete ? "border-[#d8f3e2] bg-[#f7fcf9] shadow-[0_4px_16px_rgba(42,158,105,0.06)]" : "border-[#e9e9ec] bg-white shadow-[0_4px_16px_rgba(20,22,30,0.03)] hover:border-[#ff9d85] hover:shadow-[0_8px_24px_rgba(255,104,70,0.1)]")}><span className={cx("animate-badge-float grid size-12 shrink-0 place-items-center rounded-2xl text-[18px] font-black transition-transform group-hover:scale-105", complete ? "bg-[#d5f3e1] text-[#238253]" : "bg-[#fff0eb] text-[#f16b4b]")}>{complete ? <Check size={22} strokeWidth={2.5} className="task-swing-icon" /> : <BookOpen size={21} className="task-swing-icon" />}</span><div className="min-w-[180px] flex-1"><div className="flex flex-wrap items-center gap-2"><b className="text-[13px] font-extrabold tracking-tight text-[#2b2c35]">{quiz.title}</b>{complete ? <span className="rounded-full bg-[#d5f3e1] px-2.5 py-0.5 text-[9px] font-extrabold text-[#238253]">Selesai</span> : quiz.isAttempting ? <span className="rounded-full bg-[#fff3c9] px-2.5 py-0.5 text-[9px] font-extrabold text-[#9a7207]">Sedang dikerjakan</span> : <span className="rounded-full bg-[#fff0eb] px-2.5 py-0.5 text-[9px] font-extrabold text-[#e85d3b]">Tantangan Baru</span>}</div><p className="mt-1 text-[11px] font-medium text-[#787882]">{quiz.questions.length} soal · {quiz.timePerQ} detik per soal{quiz.dueDate ? ` · Tenggat ${quiz.dueDate}` : ""}</p></div><div className="w-full sm:w-auto">{complete ? <div className="animate-count flex items-center gap-2 rounded-xl bg-[#eaf8f0] px-4 py-2.5 text-[11px] font-extrabold text-[#268455]"><CheckCircle2 size={16} /><span>+{quiz.earnedXP} XP</span></div> : <Button className="group w-full !min-h-10 !px-4 !text-[11px] sm:w-auto" onClick={() => quiz.assignmentId && onPlay(quiz.assignmentId)}><Rocket size={14} className="animate-rocket transition-transform group-hover:-translate-y-0.5 group-hover:rotate-[-8deg]" /> Mulai kuis <ArrowRight size={13} className="transition-transform group-hover:translate-x-1" /></Button>}</div></div>; })}</div>;
+  return <div className="grid gap-3 px-5 pb-5 pt-3 sm:px-6">{assignments.map((quiz, index) => { const complete = quiz.earnedXP != null; return <div key={quiz.assignmentId} style={{ animationDelay: `${index * 80}ms` }} className={cx("student-task-card animate-rise group relative flex flex-wrap items-center gap-3.5 overflow-hidden rounded-2xl border p-4 transition-all duration-200 sm:flex-nowrap", complete ? "border-[#d8f3e2] bg-[#f7fcf9] shadow-[0_4px_16px_rgba(42,158,105,0.06)]" : "border-[#e9e9ec] bg-white shadow-[0_4px_16px_rgba(20,22,30,0.03)] hover:border-[#ff9d85] hover:shadow-[0_8px_24px_rgba(255,104,70,0.1)]")}><span className={cx("animate-badge-float grid size-12 shrink-0 place-items-center rounded-2xl text-[18px] font-black transition-transform group-hover:scale-105", complete ? "bg-[#d5f3e1] text-[#238253]" : "bg-[#fff0eb] text-[#f16b4b]")}>{complete ? <Check size={22} strokeWidth={2.5} className="task-swing-icon" /> : <BookOpen size={21} className="task-swing-icon" />}</span><div className="min-w-[180px] flex-1"><div className="flex flex-wrap items-center gap-2"><b className="text-[13px] font-extrabold tracking-tight text-[#2b2c35]">{quiz.title}</b><StatusBadge status={quiz.status} fallback={complete ? "done" : quiz.isAttempting ? "attempting" : "pending"} /></div><p className="mt-1 text-[11px] font-medium text-[#787882]">{quiz.questions.length} soal · {quiz.timePerQ} detik per soal{quiz.dueDate ? ` · Tenggat ${quiz.dueDate}` : ""}</p></div><div className="w-full sm:w-auto">{complete ? <div className="animate-count flex items-center gap-2 rounded-xl bg-[#eaf8f0] px-4 py-2.5 text-[11px] font-extrabold text-[#268455]"><CheckCircle2 size={16} /><span>+{quiz.earnedXP} XP</span></div> : <Button className="group w-full !min-h-10 !px-4 !text-[11px] sm:w-auto" onClick={() => quiz.assignmentId && onPlay(quiz.assignmentId)}><Rocket size={14} className="animate-rocket transition-transform group-hover:-translate-y-0.5 group-hover:rotate-[-8deg]" /> Mulai kuis <ArrowRight size={13} className="transition-transform group-hover:translate-x-1" /></Button>}</div></div>; })}</div>;
 }
 
 function HistoryList({ history, onDetail }: { history: HistoryEntry[]; onDetail: (entry: HistoryEntry) => void }) {
   if (!history.length) return <EmptyState icon={<History size={21} />} title="Belum ada riwayat" text="Selesaikan kuis untuk melihat pembahasan di sini." />;
-  return <div className="grid gap-3 px-5 pb-5 pt-3 sm:px-6">{history.map((entry) => { const percent = entry.total ? Math.round((entry.correct / entry.total) * 100) : 0; return <button key={entry.resultId} type="button" onClick={() => onDetail(entry)} className="group flex flex-wrap items-center gap-3.5 rounded-2xl border border-[#e9e9ec] bg-white p-4 text-left shadow-[0_4px_16px_rgba(20,22,30,0.03)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#8f83e8] hover:shadow-[0_8px_24px_rgba(120,103,237,0.12)] sm:flex-nowrap"><span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-[#f1edff] text-[#775ce8]"><Award size={21} /></span><div className="min-w-[180px] flex-1"><b className="block text-[13px] font-extrabold tracking-tight text-[#2b2c35]">{entry.title}</b><small className="mt-1 block text-[10px] text-[#787882]">{entry.correct}/{entry.total} benar · {percent}% · {new Date(entry.completedAt).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}</small></div><span className="flex items-center gap-1.5 rounded-xl bg-[#fff6e8] px-3.5 py-2 text-[11px] font-extrabold text-[#cb922d]"><Zap className={cx(entry.total > 0 && entry.correct === entry.total && "animate-flame")} size={13} fill="currentColor" />+{entry.earnedXP} XP</span><ChevronRight size={15} className="text-[#b0b0b7] transition-transform group-hover:translate-x-1" /></button>; })}</div>;
+  return <div className="grid gap-3 px-5 pb-5 pt-3 sm:px-6">{history.map((entry) => { const percent = entry.total ? Math.round((entry.correct / entry.total) * 100) : 0; return <button key={entry.resultId} type="button" onClick={() => onDetail(entry)} className="group flex flex-wrap items-center gap-3.5 rounded-2xl border border-[#e9e9ec] bg-white p-4 text-left shadow-[0_4px_16px_rgba(20,22,30,0.03)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#8f83e8] hover:shadow-[0_8px_24px_rgba(120,103,237,0.12)] sm:flex-nowrap"><span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-[#f1edff] text-[#775ce8]"><Award size={21} /></span><div className="min-w-[180px] flex-1"><div className="flex flex-wrap items-center gap-2"><b className="text-[13px] font-extrabold tracking-tight text-[#2b2c35]">{entry.title}</b><StatusBadge status="done" /></div><small className="mt-1 block text-[10px] text-[#787882]">{entry.correct}/{entry.total} benar · {percent}% · {new Date(entry.completedAt).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}</small></div><span className="flex items-center gap-1.5 rounded-xl bg-[#fff6e8] px-3.5 py-2 text-[11px] font-extrabold text-[#cb922d]"><Zap className={cx(entry.total > 0 && entry.correct === entry.total && "animate-flame")} size={13} fill="currentColor" />+{entry.earnedXP} XP</span><ChevronRight size={15} className="text-[#b0b0b7] transition-transform group-hover:translate-x-1" /></button>; })}</div>;
 }
 
 function HistoryDetail({ entry }: { entry: HistoryEntry }) {
@@ -373,7 +428,7 @@ function HistoryDetail({ entry }: { entry: HistoryEntry }) {
 
 function StudentTasks({ tasks, onDelete, onReassign, disabled }: { tasks: StudentTask[]; onDelete: (assignmentId: number) => void; onReassign: (quizId: number) => void; disabled?: boolean }) {
   if (!tasks.length) return <EmptyState icon={<BookOpen size={21} />} title="Belum ada tugas" text="Tugaskan kuis untuk murid ini dari daftar kuis atau tombol di bawah." />;
-  return <div className="mt-5 space-y-2.5">{tasks.map((task) => <div key={task.assignmentId} className="flex flex-wrap items-center gap-3 rounded-2xl border border-[#ececef] bg-[#fafafb] p-3.5 sm:flex-nowrap"><span className={cx("grid size-10 shrink-0 place-items-center rounded-xl", task.earnedXP !== null ? "bg-[#d5f3e1] text-[#238253]" : "bg-[#fff0eb] text-[#f16b4b]")}>{task.earnedXP !== null ? <Check size={17} strokeWidth={2.5} /> : <BookOpen size={16} />}</span><div className="min-w-[150px] flex-1"><b className="block text-[11px] font-extrabold text-[#383941]">{task.quizTitle}</b><small className="mt-1 block text-[9px] text-[#9999a1]">{task.earnedXP !== null ? `${task.resultCorrect}/${task.resultTotal} benar · +${task.earnedXP} XP` : task.isAttempting ? "Sedang dikerjakan" : "Belum dikerjakan"}{task.dueDate ? ` · Tenggat ${task.dueDate}` : ""}</small></div><div className="flex w-full items-center gap-1.5 sm:w-auto">{task.earnedXP !== null ? <span className="rounded-full bg-[#d5f3e1] px-2.5 py-0.5 text-[9px] font-extrabold text-[#238253]">Selesai</span> : task.isAttempting ? <span className="rounded-full bg-[#fff3c9] px-2.5 py-0.5 text-[9px] font-extrabold text-[#9a7207]">Dikerjakan</span> : <span className="rounded-full bg-[#f0f0f2] px-2.5 py-0.5 text-[9px] font-extrabold text-[#767680]">Menunggu</span>}<Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" disabled={disabled} onClick={() => onReassign(task.quizId)}><Send size={11} /> Tugaskan ulang</Button><button type="button" disabled={disabled} onClick={() => onDelete(task.assignmentId)} aria-label={`Hapus tugas ${task.quizTitle}`} className="grid size-8 place-items-center rounded-lg text-[#c0562f] hover:bg-[#fff0ee] disabled:opacity-50"><Trash2 size={14} /></button></div></div>)}</div>;
+  return <div className="mt-5 space-y-2.5">{tasks.map((task) => <div key={task.assignmentId} className="flex flex-wrap items-center gap-3 rounded-2xl border border-[#ececef] bg-[#fafafb] p-3.5 sm:flex-nowrap"><span className={cx("grid size-10 shrink-0 place-items-center rounded-xl", task.earnedXP !== null ? "bg-[#d5f3e1] text-[#238253]" : "bg-[#fff0eb] text-[#f16b4b]")}>{task.earnedXP !== null ? <Check size={17} strokeWidth={2.5} /> : <BookOpen size={16} />}</span><div className="min-w-[150px] flex-1"><b className="block text-[11px] font-extrabold text-[#383941]">{task.quizTitle}</b><small className="mt-1 block text-[9px] text-[#9999a1]">{task.earnedXP !== null ? `${task.resultCorrect}/${task.resultTotal} benar · +${task.earnedXP} XP` : task.isAttempting ? "Sedang dikerjakan" : "Belum dikerjakan"}{task.dueDate ? ` · Tenggat ${task.dueDate}` : ""}</small></div><div className="flex w-full items-center gap-1.5 sm:w-auto"><StatusBadge status={task.status} fallback={task.earnedXP !== null ? "done" : task.isAttempting ? "attempting" : "pending"} /><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" disabled={disabled} onClick={() => onReassign(task.quizId)}><Send size={11} /> Tugaskan ulang</Button><button type="button" disabled={disabled} onClick={() => onDelete(task.assignmentId)} aria-label={`Hapus tugas ${task.quizTitle}`} className="grid size-8 place-items-center rounded-lg text-[#c0562f] hover:bg-[#fff0ee] disabled:opacity-50"><Trash2 size={14} /></button></div></div>)}</div>;
 }
 
 function StudentProfileForm({ student, busy, onSubmit }: { student: Student; busy: boolean; onSubmit: (values: Record<string, unknown>) => void }) {
@@ -434,24 +489,45 @@ function QuizEditor({ onSubmit, busy, initial }: { onSubmit: (values: Record<str
   </form>;
 }
 
+type PlayerAssignment = Quiz & { currentQuestion: number; totalQuestions: number; attemptXP: number; streak: number; serverNow?: number; questionStartedAt?: number; timePerQuestion?: number };
+
+function questionDeadline(payload: PlayerAssignment) {
+  const clientNow = Date.now();
+  const perQuestion = typeof payload.timePerQuestion === "number" ? payload.timePerQuestion : payload.timePerQ;
+  if (typeof payload.serverNow === "number" && typeof payload.questionStartedAt === "number") {
+    return clientNow + Math.max(0, (payload.questionStartedAt + perQuestion) * 1000 - payload.serverNow * 1000);
+  }
+  return clientNow + perQuestion * 1000;
+}
+
 function QuizPlayer({ assignmentId, onClose, onFinish }: { assignmentId: number; onClose: () => void; onFinish: (result: QuizAnswer) => void }) {
-  const [assignment, setAssignment] = useState<Quiz & { currentQuestion: number; totalQuestions: number; attemptXP: number; streak: number } | null>(null);
-  const [remaining, setRemaining] = useState(0);
+  const [assignment, setAssignment] = useState<PlayerAssignment | null>(null);
+  const [deadline, setDeadline] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<QuizAnswer | null>(null);
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
   const [started, setStarted] = useState(false);
   const [error, setError] = useState("");
   const [showExit, setShowExit] = useState(false);
+  const autoSubmitRef = useRef<number | null>(null);
   const question = assignment?.questions[0];
+  const remaining = deadline === null ? 0 : Math.max(0, Math.ceil((deadline - nowMs) / 1000));
+  const feedbackExplanation = feedback ? feedback.explanation?.trim() || question?.explanation?.trim() || undefined : undefined;
+
+  const applyAssignment = useCallback((result: { assignment: PlayerAssignment; serverNow?: number; questionStartedAt?: number; timePerQuestion?: number }) => {
+    const next = { ...result.assignment, serverNow: result.serverNow, questionStartedAt: result.questionStartedAt, timePerQuestion: result.timePerQuestion ?? result.assignment.timePerQ };
+    setAssignment(next);
+    setDeadline(questionDeadline(next));
+    setNowMs(Date.now());
+  }, []);
 
   const loadAssignment = useCallback(async () => {
-    const result = await api<{ assignment: NonNullable<typeof assignment> }>(`/quiz/${assignmentId}`);
-    setAssignment(result.assignment);
-    setRemaining(result.assignment.timePerQ);
-  }, [assignmentId]);
+    const result = await api<{ assignment: PlayerAssignment; serverNow?: number; questionStartedAt?: number; timePerQuestion?: number }>(`/quiz/${assignmentId}`);
+    applyAssignment(result);
+  }, [applyAssignment, assignmentId]);
 
-  useEffect(() => { let cancelled = false; api<{ assignment: NonNullable<typeof assignment> }>(`/quiz/${assignmentId}`).then((result) => { if (!cancelled) { setAssignment(result.assignment); setRemaining(result.assignment.timePerQ); } }).catch((cause: Error) => { if (!cancelled) setError(cause.message); }); return () => { cancelled = true; }; }, [assignmentId]);
+  useEffect(() => { let cancelled = false; api<{ assignment: PlayerAssignment; serverNow?: number; questionStartedAt?: number; timePerQuestion?: number }>(`/quiz/${assignmentId}`).then((result) => { if (!cancelled) applyAssignment(result); }).catch((cause: Error) => { if (!cancelled) setError(cause.message); }); return () => { cancelled = true; }; }, [applyAssignment, assignmentId]);
 
   const answer = useCallback(async (selected: number) => {
     if (!assignment || submitting || feedback) return;
@@ -496,12 +572,17 @@ function QuizPlayer({ assignmentId, onClose, onFinish }: { assignmentId: number;
 
   useEffect(() => {
     if (!started || !assignment || feedback || error || showExit) return;
-    const timer = window.setTimeout(() => {
-      if (remaining <= 1) void answer(-1);
-      else setRemaining((seconds) => seconds - 1);
-    }, 1000);
-    return () => window.clearTimeout(timer);
-  }, [answer, assignment, error, feedback, remaining, showExit, started]);
+    const timer = window.setInterval(() => setNowMs(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [assignment, error, feedback, showExit, started]);
+
+  useEffect(() => {
+    if (!started || !assignment || deadline === null || feedback || error || showExit || submitting) return;
+    if (remaining > 0) return;
+    if (autoSubmitRef.current === assignment.currentQuestion) return;
+    autoSubmitRef.current = assignment.currentQuestion;
+    void answer(-1);
+  }, [answer, assignment, deadline, error, feedback, remaining, showExit, started, submitting]);
 
   if (showExit) return <Dialog title="Selesaikan kuis sekarang?" subtitle="Jawaban yang sudah terkumpul akan disimpan dan dinilai. Soal yang belum dijawab dianggap salah. Kamu bisa melihat pembahasannya di Riwayat Kuis." onClose={() => setShowExit(false)}><div className="mt-6 flex gap-3"><Button variant="secondary" className="flex-1" onClick={() => setShowExit(false)}>Lanjutkan</Button><Button className="flex-1" disabled={submitting} onClick={() => void abandonQuiz()}>{submitting ? <LoaderCircle size={14} className="animate-spin" /> : "Selesaikan sekarang"}</Button></div></Dialog>;
   return <div className="fixed inset-0 z-50 grid items-end justify-items-center bg-[#111217]/65 p-0 backdrop-blur-sm sm:items-center sm:p-5"><section className="animate-scale-in relative max-h-[96vh] w-full max-w-[610px] overflow-y-auto rounded-t-[24px] bg-white p-6 sm:rounded-[24px] sm:p-9">
@@ -514,8 +595,8 @@ function QuizPlayer({ assignmentId, onClose, onFinish }: { assignmentId: number;
       {question.image ? <QuizImage src={question.image} alt="Gambar soal" className="mt-4 max-h-56 w-full rounded-2xl border border-[#ececef] object-cover shadow-sm" /> : null}
       <div className="relative mt-6 grid gap-2.5">{feedback?.isCorrect ? <><span key={`xp-${assignment.currentQuestion}`} aria-hidden="true" className="animate-xp-float pointer-events-none absolute -top-2 right-2 z-10 rounded-full bg-[#ffe9a8] px-3 py-1.5 text-[12px] font-black text-[#9a6a0a] shadow-lg">+{feedback.gain} XP{feedback.streak >= 3 ? ` · Streak x${feedback.streak}` : ""}</span><span className="burst-ring" aria-hidden="true" /><ConfettiBurst active /></> : null}{question.options.map((option, index) => { const correct = feedback?.correctAnswer === index; const wrong = !!feedback && !feedback.isCorrect && selectedAnswer === index; const img = question.optionImages && question.optionImages[index] ? question.optionImages[index] : null; return <button key={`${option}-${index}`} style={{ animationDelay: `${index * 65}ms` }} type="button" disabled={submitting || !!feedback} onClick={() => void answer(index)} className={cx("animate-option-pop flex w-full items-center gap-3 rounded-xl border px-3.5 py-3 text-left text-[12px] font-bold transition hover:border-[#ff927a] hover:bg-[#fff8f5] disabled:cursor-default", index % 2 === 0 ? "animate-slide-left" : "animate-slide-right", correct && feedback ? "animate-correct border-[#70c99b] bg-[#edfbf3] text-[#24754b]" : wrong ? "animate-wrong border-[#e98b83] bg-[#fff1ef] text-[#ad443d]" : "border-[#e7e7ea] bg-white text-[#494a52]")}><span className={cx("grid size-8 shrink-0 place-items-center rounded-lg text-[10px] font-extrabold", correct && feedback ? "bg-[#d5f3e1] text-[#238253]" : wrong ? "bg-[#ffe0dc] text-[#b7463e]" : "bg-[#f4f4f5] text-[#777880]")}>{String.fromCharCode(65 + index)}</span><span className="flex-1">{img ? <QuizImage src={img} alt={`Gambar pilihan ${String.fromCharCode(65 + index)}`} className="mb-1.5 max-h-32 w-full rounded-lg border border-[#ececef] object-cover" /> : null}{option}</span>{correct && feedback && <CheckCircle2 size={16} />}</button>; })}</div>
       {feedback && <div role="status" className={cx("animate-enter mt-4 rounded-xl px-4 py-3 text-center text-[11px] font-extrabold", feedback.isCorrect ? "bg-[#eaf8f0] text-[#268455]" : "bg-[#fff0ee] text-[#b54740]")}>{feedback.isCorrect ? `Jawaban benar! +${feedback.gain} XP` : "Belum tepat, tetap semangat!"}{feedback.isCorrect && feedback.streak >= 3 ? <span className="animate-streak ml-2 inline-flex items-center gap-1 rounded-full bg-[#ffe9a8] px-2 py-0.5 text-[10px] font-black text-[#9a6a0a]">🔥 x{feedback.streak}</span> : null}</div>}
-      {feedback?.explanation ? <div className="animate-enter mt-3 flex items-start gap-2.5 rounded-xl border border-[#e8e4ff] bg-[#f5f3ff] p-3.5 text-[11px] text-[#483d8b]"><span className="grid size-6 shrink-0 place-items-center rounded-lg bg-[#e0dbff] text-[#6350e5]"><Lightbulb size={14} /></span><div><b className="block font-extrabold">Penjelasan</b><p className="mt-0.5 leading-relaxed">{feedback.explanation}</p></div></div> : null}
-      <div className={cx("mt-5 flex items-center justify-center gap-2 text-[10px] font-bold", remaining <= 5 && !feedback ? "text-[#e6533b]" : "text-[#9999a0]")}><Clock3 size={14} className={cx(remaining <= 5 && !feedback && "animate-timer-urgent text-[#e6533b]")} />{submitting ? "Memeriksa jawaban..." : `${remaining} detik tersisa`}</div>
+      {feedback && feedbackExplanation ? <div className="animate-enter mt-3 flex items-start gap-2.5 rounded-xl border border-[#e8e4ff] bg-[#f5f3ff] p-3.5 text-[11px] text-[#483d8b]"><span className="grid size-6 shrink-0 place-items-center rounded-lg bg-[#e0dbff] text-[#6350e5]"><Lightbulb size={14} /></span><div><b className="block font-extrabold">Penjelasan</b><p className="mt-0.5 leading-relaxed">{feedbackExplanation}</p></div></div> : null}
+      <div className={cx("mt-5 flex items-center justify-center gap-2 text-[10px] font-bold", remaining <= 5 && !feedback ? "text-[#e6533b]" : "text-[#9999a0]")}><Clock3 size={14} className={cx(remaining <= 5 && !feedback && "animate-timer-urgent text-[#e6533b]")} />{submitting ? "Memeriksa jawaban..." : remaining > 0 ? `${remaining} detik tersisa` : "Waktu habis — dikirim tanpa jawaban"}</div>
       {feedback && <Button className="mt-4 w-full" disabled={submitting} onClick={() => void continueQuiz()}>{submitting ? <LoaderCircle size={14} className="animate-spin" /> : <>Lanjut ke soal berikutnya <ArrowRight size={14} /></>}</Button>}
     </>}
   </section></div>;
@@ -550,6 +631,10 @@ export default function EzQuizApp() {
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState("");
+  const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>("all");
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [analyticsError, setAnalyticsError] = useState("");
+  const [confirmState, setConfirmState] = useState<{ title: string; subtitle: string; action: () => void } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -570,10 +655,24 @@ export default function EzQuizApp() {
     return () => { cancelled = true; };
   }, [user, refreshKey]);
 
+  useEffect(() => {
+    if (user?.role !== "teacher") return;
+    let cancelled = false;
+    api<{ analytics: Analytics }>("/analytics").then((result) => { if (!cancelled) { setAnalytics(result.analytics); setAnalyticsError(""); } }).catch((cause: Error) => { if (!cancelled) setAnalyticsError(cause.message); });
+    return () => { cancelled = true; };
+  }, [user, refreshKey]);
+
   const level = useMemo(() => levelFor(user?.xp || 0), [user?.xp]);
   const completedCount = assignments.filter((assignment) => assignment.earnedXP != null).length;
   const pendingCount = assignments.length - completedCount;
   const filteredStudents = students.filter((student) => `${student.name} ${student.username}`.toLowerCase().includes(search.toLowerCase()));
+  const filteredTeacherAssignments = teacherAssignments.filter((item) => {
+    const status = statusOf(item);
+    if (assignmentFilter === "unfinished") return status !== "done";
+    if (assignmentFilter === "overdue") return status === "overdue";
+    if (assignmentFilter === "done") return status === "done";
+    return true;
+  });
   const changeView = (next: View) => { setView(next); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const notify = (message: string) => setToast(message);
   const refresh = () => setRefreshKey((value) => value + 1);
@@ -606,6 +705,11 @@ export default function EzQuizApp() {
   function openEditQuiz(quiz: Quiz) {
     setEditingQuiz(quiz);
     setModal("edit");
+  }
+
+  async function duplicateQuiz(quizId: number) {
+    setBusy(true);
+    try { await api("/duplicate", { quiz_id: quizId }); notify("Kuis berhasil diduplikat"); refresh(); } catch (cause) { notify((cause as Error).message); } finally { setBusy(false); }
   }
 
   async function assignQuiz(values: Record<string, unknown>) {
@@ -655,7 +759,8 @@ export default function EzQuizApp() {
     const classXp = leaders.reduce((sum, student) => sum + student.xp, 0);
     return <div className="space-y-5"><WelcomeBanner user={user!} teacher onCreate={() => setModal("quiz")} />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3"><StatCard icon={<BookOpen size={18} />} label="TOTAL KUIS" value={quizzes.length} helper="Siap digunakan di kelas" tone="orange" /><StatCard icon={<UsersRound size={18} />} label="TOTAL MURID" value={students.length} helper="Akun dalam kelasmu" tone="purple" /><StatCard icon={<Zap size={18} />} label="XP KELAS" value={classXp.toLocaleString("id-ID")} helper="XP yang dikumpulkan murid" tone="green" /></div>
-      <div className="grid gap-4 lg:grid-cols-[1.55fr_0.85fr]"><Panel><PanelHeading eyebrow="KONTEN KELAS" title="Kuis terbaru" action={<button type="button" onClick={() => changeView("quizzes")} className="flex items-center gap-1 text-[10px] font-bold text-[#ed6243] hover:gap-2">Lihat semua <ChevronRight size={13} /></button>} /><QuizRows quizzes={quizzes.slice(0, 4)} onAssign={(id) => { setAssignQuizId(id); setModal("assign"); }} onEdit={openEditQuiz} /></Panel><Leaderboard leaders={leaders} /></div>
+      <AnalyticsSection analytics={analytics} error={analyticsError} />
+      <div className="grid gap-4 lg:grid-cols-[1.55fr_0.85fr]"><Panel><PanelHeading eyebrow="KONTEN KELAS" title="Kuis terbaru" action={<button type="button" onClick={() => changeView("quizzes")} className="flex items-center gap-1 text-[10px] font-bold text-[#ed6243] hover:gap-2">Lihat semua <ChevronRight size={13} /></button>} /><QuizRows quizzes={quizzes.slice(0, 4)} onAssign={(id) => { setAssignQuizId(id); setModal("assign"); }} onEdit={openEditQuiz} onDuplicate={duplicateQuiz} /></Panel><Leaderboard leaders={leaders} /></div>
     </div>;
   }
 
@@ -667,8 +772,8 @@ export default function EzQuizApp() {
   }
 
   function teacherQuizzes() {
-    return <div className="animate-enter"><div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><SectionLabel>PUSTAKA BELAJAR</SectionLabel><h2 className="mt-2 text-[25px] font-black tracking-[-1px] text-[#24252b]">Semua kuis kelasmu</h2><p className="mt-1 text-[11px] text-[#92939a]">Buat latihan singkat, lalu tugaskan langsung kepada murid.</p></div><Button onClick={() => setModal("quiz")}><Plus size={14} /> Buat kuis</Button></div><Panel><PanelHeading eyebrow="KOLEKSI KUIS" title={`${quizzes.length} kuis`} /><QuizRows quizzes={quizzes} onAssign={(id) => { setAssignQuizId(id); setModal("assign"); }} onEdit={openEditQuiz} /></Panel>
-    <Panel className="mt-4"><PanelHeading eyebrow="PENUGASAN MURID" title={`${teacherAssignments.length} tugas`} action={<Pill tone="green">Selesai {teacherAssignments.filter((item) => item.earnedXP !== null).length}</Pill>} />{!teacherAssignments.length ? <EmptyState icon={<Send size={21} />} title="Belum ada tugas" text="Tugaskan kuis kepada murid dari koleksi kuis di atas." /> : <div className="overflow-x-auto"><table className="w-full min-w-[560px] text-left"><thead><tr className="border-y border-[#f0f0f2] bg-[#fafafb] text-[8px] font-extrabold tracking-[1px] text-[#a1a1a8]"><th className="px-5 py-3 font-extrabold">MURID</th><th className="px-4 py-3 font-extrabold">NILAI</th><th className="px-4 py-3 font-extrabold">STATUS</th><th className="px-5 py-3 text-right font-extrabold">AKSI</th></tr></thead><tbody>{teacherAssignments.map((item) => { const quiz = quizzes.find((q) => q.id === item.quizId); return <tr key={item.assignmentId} className="border-b border-[#f1f1f2] last:border-0 hover:bg-[#fffdfa]"><td className="px-5 py-3.5"><b className="block max-w-[200px] truncate text-[11px] font-extrabold text-[#35363d]">{quiz?.title ?? `Kuis #${item.quizId}`}</b><small className="mt-1 block text-[9px] text-[#a0a0a7]">{item.studentName} (@{item.studentUsername}){item.dueDate ? ` · Tenggat ${item.dueDate}` : ""}</small></td><td className="px-4 py-3.5 text-[10px] font-semibold text-[#777780]">{item.earnedXP !== null ? `${item.resultCorrect}/${item.resultTotal} · +${item.earnedXP} XP` : item.isAttempting ? "Sedang dikerjakan" : "Belum dikerjakan"}</td><td className="px-4 py-3.5">{item.earnedXP !== null ? <span className="rounded-full bg-[#d5f3e1] px-2.5 py-0.5 text-[9px] font-extrabold text-[#238253]">Selesai</span> : item.isAttempting ? <span className="rounded-full bg-[#fff3c9] px-2.5 py-0.5 text-[9px] font-extrabold text-[#9a7207]">Dikerjakan</span> : <span className="rounded-full bg-[#f0f0f2] px-2.5 py-0.5 text-[9px] font-extrabold text-[#767680]">Menunggu</span>}</td><td className="px-5 py-3.5 text-right"><div className="flex items-center justify-end gap-1.5"><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" onClick={() => { setAssignQuizId(item.quizId); setModal("assign"); }}><Send size={11} /> Tugaskan ulang</Button><button type="button" disabled={busy} onClick={() => { if (window.confirm(`Hapus tugas ini untuk ${item.studentName}? Hasil yang sudah selesai ikut terhapus.`)) void deleteAssignment(item.assignmentId); }} aria-label={`Hapus tugas untuk ${item.studentName}`} className="grid size-8 place-items-center rounded-lg text-[#c0562f] hover:bg-[#fff0ee] disabled:opacity-50"><Trash2 size={14} /></button></div></td></tr>; })}</tbody></table></div>}</Panel></div>;
+    return <div className="animate-enter"><div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><SectionLabel>PUSTAKA BELAJAR</SectionLabel><h2 className="mt-2 text-[25px] font-black tracking-[-1px] text-[#24252b]">Semua kuis kelasmu</h2><p className="mt-1 text-[11px] text-[#92939a]">Buat latihan singkat, lalu tugaskan langsung kepada murid.</p></div><Button onClick={() => setModal("quiz")}><Plus size={14} /> Buat kuis</Button></div><Panel><PanelHeading eyebrow="KOLEKSI KUIS" title={`${quizzes.length} kuis`} /><QuizRows quizzes={quizzes} onAssign={(id) => { setAssignQuizId(id); setModal("assign"); }} onEdit={openEditQuiz} onDuplicate={duplicateQuiz} /></Panel>
+    <Panel className="mt-4"><PanelHeading eyebrow="PENUGASAN MURID" title={`${teacherAssignments.length} tugas`} action={<Pill tone="green">Selesai {teacherAssignments.filter((item) => statusOf(item) === "done").length}</Pill>} /><div className="flex flex-wrap items-center gap-1.5 border-t border-[#f4f4f6] px-5 py-3.5 sm:px-6" role="group" aria-label="Filter status tugas">{ASSIGNMENT_FILTERS.map((filter) => <button type="button" key={filter.id} aria-pressed={assignmentFilter === filter.id} onClick={() => setAssignmentFilter(filter.id)} className={cx("rounded-lg px-2.5 py-1.5 text-[10px] font-bold transition", assignmentFilter === filter.id ? "bg-[#fff0eb] text-[#e85d3b]" : "bg-[#f3f3f5] text-[#83838b] hover:bg-[#ededf0]")}>{filter.label}</button>)}</div>{!filteredTeacherAssignments.length ? <EmptyState icon={<Send size={21} />} title={teacherAssignments.length ? "Tidak ada tugas di filter ini" : "Belum ada tugas"} text={teacherAssignments.length ? "Coba pilih filter status yang lain." : "Tugaskan kuis kepada murid dari koleksi kuis di atas."} /> : <div className="overflow-x-auto"><table className="w-full min-w-[560px] text-left"><thead><tr className="border-y border-[#f0f0f2] bg-[#fafafb] text-[8px] font-extrabold tracking-[1px] text-[#a1a1a8]"><th className="px-5 py-3 font-extrabold">MURID</th><th className="px-4 py-3 font-extrabold">NILAI</th><th className="px-4 py-3 font-extrabold">STATUS</th><th className="px-5 py-3 text-right font-extrabold">AKSI</th></tr></thead><tbody>{filteredTeacherAssignments.map((item) => { const quiz = quizzes.find((q) => q.id === item.quizId); return <tr key={item.assignmentId} className="border-b border-[#f1f1f2] last:border-0 hover:bg-[#fffdfa]"><td className="px-5 py-3.5"><b className="block max-w-[200px] truncate text-[11px] font-extrabold text-[#35363d]">{quiz?.title ?? `Kuis #${item.quizId}`}</b><small className="mt-1 block text-[9px] text-[#a0a0a7]">{item.studentName} (@{item.studentUsername}){item.dueDate ? ` · Tenggat ${item.dueDate}` : ""}</small></td><td className="px-4 py-3.5 text-[10px] font-semibold text-[#777780]">{item.earnedXP !== null ? `${item.resultCorrect}/${item.resultTotal} · +${item.earnedXP} XP` : item.isAttempting ? "Sedang dikerjakan" : "Belum dikerjakan"}</td><td className="px-4 py-3.5"><StatusBadge status={item.status} fallback={item.earnedXP !== null ? "done" : item.isAttempting ? "attempting" : "pending"} /></td><td className="px-5 py-3.5 text-right"><div className="flex items-center justify-end gap-1.5"><Button variant="secondary" className="!min-h-8 !px-2.5 !text-[9px]" onClick={() => { setAssignQuizId(item.quizId); setModal("assign"); }}><Send size={11} /> Tugaskan ulang</Button><button type="button" disabled={busy} onClick={() => setConfirmState({ title: "Hapus tugas ini?", subtitle: `Tugas untuk ${item.studentName} beserta hasilnya akan dihapus.`, action: () => void deleteAssignment(item.assignmentId) })} aria-label={`Hapus tugas untuk ${item.studentName}`} className="grid size-8 place-items-center rounded-lg text-[#c0562f] hover:bg-[#fff0ee] disabled:opacity-50"><Trash2 size={14} /></button></div></td></tr>; })}</tbody></table></div>}</Panel></div>;
   }
 
   function teacherStudents() {
@@ -687,12 +792,13 @@ export default function EzQuizApp() {
     <nav aria-label="Navigasi utama" className="fixed inset-x-0 bottom-0 z-30 flex justify-around border-t border-[#e9e9ec] bg-white/95 px-3 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl lg:hidden">{navItems.map((item) => <button type="button" key={item.id} onClick={() => changeView(item.id)} className={cx("flex min-w-[76px] flex-col items-center gap-1 rounded-xl px-3 py-2 text-[9px] font-bold", view === item.id ? "text-[#ed6243]" : "text-[#96969e]")}>{item.icon}{item.label}</button>)}<button type="button" onClick={() => void logout()} className="flex min-w-[60px] flex-col items-center gap-1 rounded-xl px-3 py-2 text-[9px] font-bold text-[#96969e]"><LogOut size={17} />Keluar</button></nav>
     {modal === "student" && <Dialog title="Tambah murid" subtitle="Bagikan username dan password ini kepada murid." eyebrow="AKUN KELAS" onClose={() => setModal(null)}><form className="mt-5 space-y-4" onSubmit={(event) => { event.preventDefault(); void addStudent(Object.fromEntries(new FormData(event.currentTarget).entries())); }}><Field label="Nama lengkap" name="name" placeholder="cth. Naya Putri" required /><Field label="Username" name="username" placeholder="cth. nayaputri" minLength={3} required /><Field label="Password awal" name="password" type="password" placeholder="Minimal 8 karakter" minLength={8} required /><Button className="w-full" disabled={busy}>{busy ? <LoaderCircle size={15} className="animate-spin" /> : <Plus size={14} />} Buat akun murid</Button></form></Dialog>}
     {modal === "quiz" && <Dialog title="Kuis baru" subtitle="Tambahkan pertanyaan pilihan ganda untuk kelasmu." eyebrow="BUAT MATERI LATIHAN" wide onClose={() => setModal(null)}><QuizEditor busy={busy} onSubmit={(values) => void createQuiz(values)} /></Dialog>}
-    {modal === "edit" && editingQuiz && <Dialog title="Ubah kuis" subtitle="Perbarui pertanyaan, pilihan jawaban, atau pengaturan waktu." eyebrow="PENGATURAN MATERI" wide onClose={() => { setModal(null); setEditingQuiz(null); }}><QuizEditor busy={busy} initial={editingQuiz} onSubmit={(values) => void updateQuiz(values)} /><div className="mt-5 border-t border-[#f0f0f2] pt-4"><Button variant="secondary" className="w-full !text-[#c0562f] hover:!bg-[#fff0ee]" disabled={busy} onClick={() => { if (window.confirm("Hapus kuis ini beserta seluruh tugas dan hasilnya?")) void deleteQuiz(editingQuiz.id); }}><Trash2 size={14} /> Hapus kuis</Button></div></Dialog>}
+    {modal === "edit" && editingQuiz && <Dialog title="Ubah kuis" subtitle="Perbarui pertanyaan, pilihan jawaban, atau pengaturan waktu." eyebrow="PENGATURAN MATERI" wide onClose={() => { setModal(null); setEditingQuiz(null); }}><QuizEditor busy={busy} initial={editingQuiz} onSubmit={(values) => void updateQuiz(values)} /><div className="mt-5 border-t border-[#f0f0f2] pt-4"><Button variant="secondary" className="w-full !text-[#c0562f] hover:!bg-[#fff0ee]" disabled={busy} onClick={() => setConfirmState({ title: "Hapus kuis ini?", subtitle: "Kuis beserta seluruh tugas dan hasil murid akan dihapus permanen.", action: () => void deleteQuiz(editingQuiz.id) })}><Trash2 size={14} /> Hapus kuis</Button></div></Dialog>}
     {modal === "assign" && <Dialog title="Tugaskan kuis" subtitle="Pilih murid yang akan menerima kuis ini." eyebrow="BAGIKAN TANTANGAN" onClose={() => setModal(null)}>{!students.length ? <div className="mt-5"><EmptyState icon={<UsersRound size={21} />} title="Tambahkan murid terlebih dahulu" text="Buat akun murid sebelum memberi tugas." /></div> : <form className="mt-5 space-y-4" onSubmit={(event) => { event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget).entries()); void assignQuiz({ student_id: values.student_id, due_date: values.due_date, quiz_id: assignQuizId ?? values.quiz_pick }); }}><label className="block text-[11px] font-bold text-[#4f5059]">Pilih kuis<select name="quiz_pick" value={assignQuizId ?? ""} onChange={(event) => setAssignQuizId(event.target.value ? Number(event.target.value) : null)} required className="mt-2 w-full rounded-xl border border-[#e6e6e9] bg-white px-3.5 py-3 text-[12px] outline-none focus:border-[#ff8468]"><option value="">Pilih kuis...</option>{quizzes.map((quiz) => <option key={quiz.id} value={quiz.id}>{quiz.title} ({quiz.questions.length} soal)</option>)}</select></label><label className="block text-[11px] font-bold text-[#4f5059]">Pilih murid<select name="student_id" required defaultValue={studentDetail?.id ?? ""} className="mt-2 w-full rounded-xl border border-[#e6e6e9] bg-white px-3.5 py-3 text-[12px] outline-none focus:border-[#ff8468]"><option value="">Pilih murid...</option>{students.map((student) => <option key={student.id} value={student.id}>{student.name} (@{student.username})</option>)}</select></label><Field label="Tenggat (opsional)" name="due_date" type="date" /><Button className="w-full" disabled={busy}>{busy ? <LoaderCircle size={15} className="animate-spin" /> : <ArrowRight size={14} />} Kirim tugas</Button></form>}</Dialog>}
     {playingId !== null && <QuizPlayer assignmentId={playingId} onClose={() => { setPlayingId(null); refresh(); }} onFinish={finishQuiz} />}
     {finished && <FinishDialog result={finished} onClose={closeFinish} />}
     {modal === "history-detail" && historyEntry && <Dialog title={historyEntry.title} subtitle={`${historyEntry.correct}/${historyEntry.total} benar · +${historyEntry.earnedXP} XP`} eyebrow="PEMBAHASAN KUIS" wide onClose={() => { setModal(null); setHistoryEntry(null); }}><HistoryDetail entry={historyEntry} /></Dialog>}
-    {modal === "student-detail" && studentDetail && <Dialog title={studentDetail.name} subtitle={`@${studentDetail.username} · ${studentDetail.xp.toLocaleString("id-ID")} XP · ${studentTasks.length} tugas`} eyebrow="DETAIL MURID" wide onClose={() => { setModal(null); setStudentDetail(null); setProfileMode(false); }}><div className="grid grid-cols-2 rounded-xl bg-[#f3f3f5] p-1" role="tablist" aria-label="Detail murid"><button type="button" role="tab" aria-selected={!profileMode} onClick={() => setProfileMode(false)} className={cx("rounded-[9px] px-3 py-2.5 text-[11px] font-bold transition", !profileMode ? "bg-white text-[#34353d] shadow-sm" : "text-[#8a8a93]")}>Tugas murid</button><button type="button" role="tab" aria-selected={profileMode} onClick={() => setProfileMode(true)} className={cx("rounded-[9px] px-3 py-2.5 text-[11px] font-bold transition", profileMode ? "bg-white text-[#34353d] shadow-sm" : "text-[#8a8a93]")}>Edit profil</button></div>{profileMode ? <StudentProfileForm student={studentDetail} busy={busy} onSubmit={(values) => void updateStudent(values)} /> : <StudentTasks tasks={studentTasks} disabled={busy} onReassign={(quizId) => { setAssignQuizId(quizId); setModal("assign"); }} onDelete={(assignmentId) => { if (window.confirm("Hapus tugas ini? Hasil yang sudah selesai ikut terhapus.")) void deleteAssignment(assignmentId); }} />}</Dialog>}
+    {modal === "student-detail" && studentDetail && <Dialog title={studentDetail.name} subtitle={`@${studentDetail.username} · ${studentDetail.xp.toLocaleString("id-ID")} XP · ${studentTasks.length} tugas`} eyebrow="DETAIL MURID" wide onClose={() => { setModal(null); setStudentDetail(null); setProfileMode(false); }}><div className="grid grid-cols-2 rounded-xl bg-[#f3f3f5] p-1" role="tablist" aria-label="Detail murid"><button type="button" role="tab" aria-selected={!profileMode} onClick={() => setProfileMode(false)} className={cx("rounded-[9px] px-3 py-2.5 text-[11px] font-bold transition", !profileMode ? "bg-white text-[#34353d] shadow-sm" : "text-[#8a8a93]")}>Tugas murid</button><button type="button" role="tab" aria-selected={profileMode} onClick={() => setProfileMode(true)} className={cx("rounded-[9px] px-3 py-2.5 text-[11px] font-bold transition", profileMode ? "bg-white text-[#34353d] shadow-sm" : "text-[#8a8a93]")}>Edit profil</button></div>{profileMode ? <StudentProfileForm student={studentDetail} busy={busy} onSubmit={(values) => void updateStudent(values)} /> : <StudentTasks tasks={studentTasks} disabled={busy} onReassign={(quizId) => { setAssignQuizId(quizId); setModal("assign"); }} onDelete={(assignmentId) => setConfirmState({ title: "Hapus tugas ini?", subtitle: "Hasil yang sudah selesai ikut terhapus.", action: () => void deleteAssignment(assignmentId) })} />}</Dialog>}
+    {confirmState && <ConfirmDialog title={confirmState.title} subtitle={confirmState.subtitle} onCancel={() => setConfirmState(null)} onConfirm={() => { const run = confirmState.action; setConfirmState(null); run(); }} />}
     {toast && <Toast message={toast} onDone={() => setToast("")} />}
     <span className="sr-only">{completedCount} kuis selesai</span>
   </div>;

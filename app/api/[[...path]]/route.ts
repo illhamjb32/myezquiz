@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { database } from "@/lib/db";
 import { createSessionToken, hashPassword, hashSessionToken, SESSION_COOKIE, verifyPassword } from "@/lib/auth";
+import { buildAnalytics, type AnalyticsAssignment } from "@/lib/analytics";
+import { createRateLimiter } from "@/lib/rate-limit";
 
 type DbUser = { id: number; username: string; name: string; role: "teacher" | "student"; xp: number; password?: string; teacher_id?: number | null };
 type DbQuiz = { id: number; title: string; description: string; time_per_question: number; questions: Array<{ q: string; options: string[]; answer?: number; points?: number; explanation?: string; image?: string; optionImages?: Array<string | null> }> };
@@ -9,6 +11,25 @@ type DbQuestion = { q: string; options: string[]; answer?: number; points?: numb
 type QuizPayload = { title: string; desc: string; timePerQ: number; questions: DbQuestion[] };
 type AnswerRec = { selected: number | null; isCorrect: boolean; gain: number };
 type DbAttemptFields = { current_question: number; attempt_correct: number; attempt_xp: number; streak: number; question_started_at: number; answers: AnswerRec[] };
+
+// Pembatas laju in-memory: sekitar 10 percobaan login per 5 menit dan 30 jawaban per 10 detik.
+const loginLimiter = createRateLimiter({ limit: 10, windowMs: 5 * 60 * 1000 });
+const answerLimiter = createRateLimiter({ limit: 30, windowMs: 10 * 1000 });
+
+function clientIp(request: NextRequest) {
+  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
+}
+
+// Status tugas dihitung di server supaya klien tidak perlu menafsirkan tanggal sendiri.
+function assignmentStatus(dueDate: string | null, completed: boolean, attempting: boolean) {
+  if (completed) return "done" as const;
+  if (attempting) return "attempting" as const;
+  if (!dueDate) return "pending" as const;
+  const today = new Date().toISOString().slice(0, 10);
+  if (dueDate < today) return "overdue" as const;
+  if (dueDate === today) return "due_today" as const;
+  return "pending" as const;
+}
 
 const templates: Array<Omit<QuizPayload, "title"> & { title: string }> = [
   { title: "Matematika Seru — Level 1", desc: "Penjumlahan & pengurangan cepat.", timePerQ: 20, questions: [
@@ -121,13 +142,30 @@ function toAnswers(value: unknown): AnswerRec[] {
   });
 }
 
+/**
+ * Menutup satu percobaan kuis secara idempotent.
+ * Insert hasil dikunci lewat NOT EXISTS + UNIQUE(assignment_id) pada tabel results, dan XP
+ * hanya ditambahkan bila insert tersebut benar-benar terjadi. Jadi dua permintaan bersamaan
+ * (klik ganda, jawab + keluar) tidak mungkin menambah XP dua kali maupun saling melempar error:
+ * pemanggil kedua membaca ulang baris hasil yang sudah tersimpan dan mengembalikan data yang sama.
+ */
 async function finalizeAttempt(sql: ReturnType<typeof database>, assignmentId: number, studentId: number, questions: DbQuestion[], answers: AnswerRec[], correct: number, xp: number) {
   await sql.transaction((tx) => [
-    tx`INSERT INTO results (assignment_id, correct, total, xp, answers) VALUES (${assignmentId}, ${correct}, ${questions.length}, ${xp}, ${JSON.stringify(answers)}::jsonb)`,
-    tx`UPDATE users SET xp = xp + ${xp} WHERE id = ${studentId}`,
-    tx`DELETE FROM attempts WHERE assignment_id = ${assignmentId}`,
+    tx`WITH inserted AS (
+      INSERT INTO results (assignment_id, correct, total, xp, answers)
+      VALUES (${assignmentId}, ${correct}, ${questions.length}, ${xp}, ${JSON.stringify(answers)}::jsonb)
+      ON CONFLICT (assignment_id) DO NOTHING
+      RETURNING assignment_id
+    )
+    UPDATE users SET xp = xp + ${xp} WHERE id = ${studentId} AND EXISTS (SELECT 1 FROM inserted)`,
+    tx`DELETE FROM attempts WHERE assignment_id = ${assignmentId} AND student_id = ${studentId}`,
   ]);
-  return { isCorrect: answers[answers.length - 1]?.isCorrect ?? false, correctAnswer: answers.length ? questions[answers.length - 1]?.answer : null, gain: answers[answers.length - 1]?.gain ?? 0, xp, streak: 0, finished: true, correct, total: questions.length, nextQuestion: questions.length, explanation: null };
+  const stored = await sql`SELECT correct, total, xp, answers FROM results WHERE assignment_id = ${assignmentId} LIMIT 1` as unknown as Array<{ correct: number; total: number; xp: number; answers: unknown }>;
+  const saved = stored[0];
+  const finalAnswers = saved ? toAnswers(saved.answers) : answers;
+  const last = finalAnswers[finalAnswers.length - 1];
+  const finalTotal = saved ? Number(saved.total) : questions.length;
+  return { isCorrect: last?.isCorrect ?? false, correctAnswer: last && questions.length ? questions[finalAnswers.length - 1]?.answer ?? null : null, gain: last?.gain ?? 0, xp: saved ? Number(saved.xp) : xp, streak: 0, finished: true, correct: saved ? Number(saved.correct) : correct, total: finalTotal, nextQuestion: finalTotal, explanation: null };
 }
 
 function routeError(error: unknown) {
@@ -164,12 +202,17 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
       const student = rows[0];
       if (!student) throw new ApiError("Murid tidak ditemukan.", 404);
       const tasks = await sql`SELECT a.id AS assignment_id, a.quiz_id, a.due_date::text AS due_date, q.title AS quiz_title, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, t.current_question FROM assignments a JOIN quizzes q ON q.id = a.quiz_id LEFT JOIN results r ON r.assignment_id = a.id LEFT JOIN attempts t ON t.assignment_id = a.id WHERE a.student_id = ${studentId} AND q.teacher_id = ${user.id} ORDER BY a.id DESC`;
-      return json({ student: { id: Number(student.id), username: student.username, name: student.name, xp: Number(student.xp) }, assignments: tasks.map((row) => ({ assignmentId: Number(row.assignment_id), quizId: Number(row.quiz_id), quizTitle: row.quiz_title, dueDate: row.due_date, earnedXP: row.earned_xp === null ? null : Number(row.earned_xp), resultCorrect: row.result_correct === null ? null : Number(row.result_correct), resultTotal: row.result_total === null ? null : Number(row.result_total), isAttempting: row.current_question !== null })) });
+      return json({ student: { id: Number(student.id), username: student.username, name: student.name, xp: Number(student.xp) }, assignments: tasks.map((row) => ({ assignmentId: Number(row.assignment_id), quizId: Number(row.quiz_id), quizTitle: row.quiz_title, dueDate: row.due_date, earnedXP: row.earned_xp === null ? null : Number(row.earned_xp), resultCorrect: row.result_correct === null ? null : Number(row.result_correct), resultTotal: row.result_total === null ? null : Number(row.result_total), isAttempting: row.current_question !== null, status: assignmentStatus(row.due_date, row.result_correct !== null, row.current_question !== null) })) });
     }
     if (route === "/quizzes" && user.role === "teacher") {
       const quizzes = await sql`SELECT id, title, description, time_per_question, questions FROM quizzes WHERE teacher_id = ${user.id} ORDER BY id DESC` as unknown as DbQuiz[];
       const assignments = await sql`SELECT a.id AS assignment_id, a.quiz_id, a.student_id, a.due_date::text AS due_date, u.name AS student_name, u.username AS student_username, r.xp AS earned_xp, r.correct AS result_correct, r.total AS result_total, r.completed_at::text AS completed_at, t.current_question FROM assignments a JOIN quizzes q ON q.id = a.quiz_id JOIN users u ON u.id = a.student_id LEFT JOIN results r ON r.assignment_id = a.id LEFT JOIN attempts t ON t.assignment_id = a.id WHERE q.teacher_id = ${user.id} ORDER BY a.id DESC`;
-      return json({ quizzes: quizzes.map(quizDict), assignments: assignments.map((row) => ({ assignmentId: Number(row.assignment_id), quizId: Number(row.quiz_id), studentId: Number(row.student_id), studentName: row.student_name, studentUsername: row.student_username, dueDate: row.due_date, earnedXP: row.earned_xp === null ? null : Number(row.earned_xp), resultCorrect: row.result_correct === null ? null : Number(row.result_correct), resultTotal: row.result_total === null ? null : Number(row.result_total), completedAt: row.completed_at, isAttempting: row.current_question !== null })) });
+      return json({ quizzes: quizzes.map(quizDict), assignments: assignments.map((row) => ({ assignmentId: Number(row.assignment_id), quizId: Number(row.quiz_id), studentId: Number(row.student_id), studentName: row.student_name, studentUsername: row.student_username, dueDate: row.due_date, earnedXP: row.earned_xp === null ? null : Number(row.earned_xp), resultCorrect: row.result_correct === null ? null : Number(row.result_correct), resultTotal: row.result_total === null ? null : Number(row.result_total), completedAt: row.completed_at, isAttempting: row.current_question !== null, status: assignmentStatus(row.due_date, row.result_correct !== null, row.current_question !== null) })) });
+    }
+    if (route === "/analytics") {
+      await requireUser(request, "teacher");
+      const rows = await sql`SELECT a.id AS assignment_id, a.student_id AS "studentId", u.name AS "studentName", u.xp AS "studentXp", q.id AS "quizId", q.title AS "quizTitle", q.questions, r.answers, r.correct, r.total, (r.id IS NOT NULL) AS completed FROM assignments a JOIN quizzes q ON q.id = a.quiz_id JOIN users u ON u.id = a.student_id LEFT JOIN results r ON r.assignment_id = a.id WHERE q.teacher_id = ${user.id} ORDER BY a.id` as unknown as AnalyticsAssignment[];
+      return json({ analytics: buildAnalytics(rows) });
     }
     if (route === "/history" && user.role === "student") {
       const rows = await sql`SELECT a.id AS assignment_id, a.due_date::text AS due_date, r.id AS result_id, r.correct, r.total, r.xp AS earned_xp, r.completed_at::text AS completed_at, r.answers, q.id AS quiz_id, q.title, q.description, q.time_per_question, q.questions FROM results r JOIN assignments a ON a.id = r.assignment_id JOIN quizzes q ON q.id = a.quiz_id WHERE a.student_id = ${user.id} ORDER BY r.completed_at DESC`;
@@ -186,12 +229,12 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
       const assignment = rows[0];
       if (!assignment) throw new ApiError("Kuis tidak ditemukan.", 404);
       if (assignment.earned_xp !== null) throw new ApiError("Kuis ini sudah pernah diselesaikan.", 409);
-      const attempts = await sql`INSERT INTO attempts (assignment_id, student_id, question_started_at) VALUES (${assignmentId}, ${user.id}, ${Math.floor(Date.now() / 1000)}) ON CONFLICT (assignment_id) DO UPDATE SET student_id = EXCLUDED.student_id RETURNING current_question, xp, streak`;
+      const attempts = await sql`INSERT INTO attempts (assignment_id, student_id, question_started_at) VALUES (${assignmentId}, ${user.id}, ${Math.floor(Date.now() / 1000)}) ON CONFLICT (assignment_id) DO UPDATE SET student_id = EXCLUDED.student_id RETURNING current_question, xp, streak, question_started_at`;
       const attempt = attempts[0];
       const questions = assignment.questions;
       const question = questions[Number(attempt.current_question)];
       if (!question) throw new ApiError("Semua soal kuis ini sudah dijawab.", 409);
-      return json({ assignment: { ...quizDict(assignment), questions: [{ q: question.q, options: question.options, points: question.points ?? 100, image: question.image, optionImages: question.optionImages }], assignmentId, dueDate: assignment.due_date, earnedXP: null, resultCorrect: null, resultTotal: null, currentQuestion: Number(attempt.current_question), totalQuestions: questions.length, attemptXP: Number(attempt.xp), streak: Number(attempt.streak) } });
+      return json({ assignment: { ...quizDict(assignment), questions: [{ q: question.q, options: question.options, points: question.points ?? 100, image: question.image, optionImages: question.optionImages }], assignmentId, dueDate: assignment.due_date, earnedXP: null, resultCorrect: null, resultTotal: null, currentQuestion: Number(attempt.current_question), totalQuestions: questions.length, attemptXP: Number(attempt.xp), streak: Number(attempt.streak) }, serverNow: Math.floor(Date.now() / 1000), questionStartedAt: Number(attempt.question_started_at), timePerQuestion: Number(assignment.time_per_question) });
     }
     if (route === "/leaderboard") {
       const teacherId = user.role === "student" ? user.teacher_id : user.id;
@@ -244,12 +287,18 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
     if (route === "/login") {
       const username = typeof data.username === "string" ? data.username.trim().toLowerCase() : "";
       const password = typeof data.password === "string" ? data.password : "";
+      const rate = loginLimiter.check(`${username}:${clientIp(request)}`);
+      if (!rate.allowed) return json({ error: "Terlalu banyak percobaan masuk. Coba lagi beberapa saat lagi." }, 429, { "Retry-After": String(Math.ceil(rate.retryAfterMs / 1000)) });
       const rows = await sql`SELECT id, username, name, role, xp, password FROM users WHERE username = ${username} LIMIT 1` as unknown as DbUser[];
       const user = rows[0];
       if (!user || !user.password || !(await verifyPassword(password, user.password))) throw new ApiError("Username atau password salah.", 401);
       const token = createSessionToken();
       const expiresAt = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30;
-      await sql`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (${hashSessionToken(token)}, ${user.id}, ${expiresAt})`;
+      // Bersihkan sesi kedaluwarsa sekaligus saat login berhasil.
+      await sql.transaction((tx) => [
+        tx`DELETE FROM sessions WHERE expires_at < ${Math.floor(Date.now() / 1000)}`,
+        tx`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (${hashSessionToken(token)}, ${user.id}, ${expiresAt})`,
+      ]);
       return json({ user: publicUser(user) }, 200, sessionCookie(token));
     }
     const user = await requireUser(request);
@@ -274,6 +323,15 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
       const rows = await sql`INSERT INTO quizzes (teacher_id, title, description, time_per_question, questions) VALUES (${user.id}, ${quiz.title}, ${quiz.desc}, ${quiz.timePerQ}, ${JSON.stringify(quiz.questions)}::jsonb) RETURNING id`;
       return json({ id: Number(rows[0].id) }, 201);
     }
+    if (route === "/duplicate") {
+      await requireUser(request, "teacher");
+      const quizId = Number(data.quiz_id);
+      if (!Number.isInteger(quizId)) throw new ApiError("Kuis tidak ditemukan.", 400);
+      // Salinan hanya membawa isi kuis; tugas dan hasil murid tidak ikut disalin.
+      const rows = await sql`INSERT INTO quizzes (teacher_id, title, description, time_per_question, questions) SELECT teacher_id, title || ' (salinan)', description, time_per_question, questions FROM quizzes WHERE id = ${quizId} AND teacher_id = ${user.id} RETURNING id, title, description, time_per_question, questions` as unknown as DbQuiz[];
+      if (!rows.length) throw new ApiError("Kuis tidak ditemukan.", 404);
+      return json({ quiz: quizDict(rows[0]) }, 201);
+    }
     if (route === "/assignments") {
       await requireUser(request, "teacher");
       const studentId = Number(data.student_id);
@@ -287,6 +345,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
     }
     if (path[0] === "answer" && path[1] && /^\d+$/.test(path[1])) {
       const student = await requireUser(request, "student");
+      const rate = answerLimiter.check(String(student.id));
+      if (!rate.allowed) return json({ error: "Terlalu banyak jawaban dalam waktu singkat. Coba lagi nanti." }, 429, { "Retry-After": String(Math.ceil(rate.retryAfterMs / 1000)) });
       const assignmentId = Number(path[1]);
       const expectedIndex = Number(data.question_index);
       const selected = data.answer;
@@ -311,11 +371,10 @@ export async function POST(request: NextRequest, context: { params: Promise<{ pa
       const answers = toAnswers(attempt.answers);
       answers[index] = { selected: typeof selected === "number" ? selected : null, isCorrect, gain };
       const finished = nextIndex >= attempt.questions.length;
-      if (finished) {
-        await finalizeAttempt(sql, assignmentId, student.id, attempt.questions, answers, correct, xp);
-      } else {
-        await sql`UPDATE attempts SET current_question = ${nextIndex}, correct = ${correct}, xp = ${xp}, streak = ${streak}, question_started_at = ${now}, answers = ${JSON.stringify(answers)}::jsonb WHERE assignment_id = ${assignmentId} AND student_id = ${student.id}`;
-      }
+      // Update bersyarat membuat baca+ubah atomik: klik ganda tidak bisa menghitung XP dua kali.
+      const advanced = await sql`UPDATE attempts SET current_question = ${nextIndex}, correct = ${correct}, xp = ${xp}, streak = ${streak}, question_started_at = ${now}, answers = ${JSON.stringify(answers)}::jsonb WHERE assignment_id = ${assignmentId} AND student_id = ${student.id} AND current_question = ${expectedIndex} RETURNING assignment_id`;
+      if (!advanced.length) throw new ApiError("Sesi kuis sudah berubah. Muat ulang kuis untuk melanjutkan.", 409);
+      if (finished) await finalizeAttempt(sql, assignmentId, student.id, attempt.questions, answers, correct, xp);
       return json({ isCorrect, correctAnswer: question.answer, gain, xp, streak, finished, correct, total: attempt.questions.length, nextQuestion: nextIndex, explanation: question.explanation || null });
     }
     if (path[0] === "abandon" && path[1] && /^\d+$/.test(path[1])) {
@@ -377,9 +436,12 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ pat
       if (!isUsername(username)) throw new ApiError("Username murid tidak valid (3–30 karakter: huruf kecil, angka, _ . -).", 400);
       const password = typeof data.password === "string" ? data.password : "";
       if (password && password.length < 8) throw new ApiError("Password baru minimal 8 karakter (kosongkan bila tidak diubah).", 400);
+      // Cakupan kepemilikan diulang di UPDATE, bukan hanya di SELECT, supaya kepemilikan yang
+      // berubah di antara kedua query tidak bisa membuat guru lain ikut mengubah baris ini.
       const updated = password
-        ? await sql`UPDATE users SET name = ${name}, username = ${username}, password = ${await hashPassword(password)} WHERE id = ${studentId} RETURNING id, username, name`
-        : await sql`UPDATE users SET name = ${name}, username = ${username} WHERE id = ${studentId} RETURNING id, username, name`;
+        ? await sql`UPDATE users SET name = ${name}, username = ${username}, password = ${await hashPassword(password)} WHERE id = ${studentId} AND teacher_id = ${teacher.id} AND role = 'student' RETURNING id, username, name`
+        : await sql`UPDATE users SET name = ${name}, username = ${username} WHERE id = ${studentId} AND teacher_id = ${teacher.id} AND role = 'student' RETURNING id, username, name`;
+      if (!updated.length) throw new ApiError("Murid tidak ditemukan.", 404);
       return json({ student: { id: Number(updated[0].id), username: updated[0].username, name: updated[0].name } });
     }
     throw new ApiError("Endpoint tidak ditemukan.", 404);
